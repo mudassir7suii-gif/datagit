@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments & secrets
+.env
+.env.local
+*.env
+
+# Local database journals & WAL
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Generated export artifacts
+exports/datagit_*
+exports/*.parquet
+exports/*.csv
+exports/*.json
+
+# Node & Next.js frontend
+datagit-frontend/.next/
+datagit-frontend/out/
+datagit-frontend/build/
+datagit-frontend/node_modules/
+node_modules/
+.next/
+
+# Logs & temp files
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

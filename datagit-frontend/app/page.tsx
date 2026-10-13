@@ -4,7 +4,7 @@ import React, { useState, useEffect, FormEvent, useCallback } from 'react';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL !== undefined
   ? process.env.NEXT_PUBLIC_API_URL
-  : (process.env.NODE_ENV === 'production' ? '' : 'http://127.0.0.1:8000');
+  : '';
 
 interface Repository {
   id: number;
@@ -313,8 +313,14 @@ export default function DataGitApp() {
         credentials: 'include',
         body: JSON.stringify({ email, password }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Sign up failed');
+      let data: any = null;
+      try {
+        data = await res.json();
+      } catch {
+        const text = await res.text().catch(() => '');
+        data = { detail: text || `Server error (${res.status})` };
+      }
+      if (!res.ok) throw new Error(data?.detail || 'Sign up failed');
       setSuccessMsg('Account created successfully! Please sign in.');
       setView('signin');
     } catch (err: unknown) {
@@ -334,8 +340,14 @@ export default function DataGitApp() {
         credentials: 'include',
         body: JSON.stringify({ email, password }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Sign in failed');
+      let data: any = null;
+      try {
+        data = await res.json();
+      } catch {
+        const text = await res.text().catch(() => '');
+        data = { detail: text || `Server error (${res.status})` };
+      }
+      if (!res.ok) throw new Error(data?.detail || 'Sign in failed');
 
       const authToken = data.access_token;
       setToken(authToken);

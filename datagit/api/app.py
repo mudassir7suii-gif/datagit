@@ -35,6 +35,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -104,9 +105,13 @@ def sign_up(req: UserAuthRequest, request: Request, response: Response, db: Sess
     
     hashed = hash_password(password)
     user = User(email=email, hashed_password=hashed)
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+    try:
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database transaction error: {str(e)}")
 
     token = create_access_token({"sub": user.email})
     # Set httpOnly cookie for web clients per Principle 1
@@ -119,8 +124,11 @@ def sign_up(req: UserAuthRequest, request: Request, response: Response, db: Sess
         max_age=settings.jwt_expiration_minutes * 60
     )
 
-    db.add(AuditLog(user_email=user.email, action="user_signup", ip_address=ip))
-    db.commit()
+    try:
+        db.add(AuditLog(user_email=user.email, action="user_signup", ip_address=ip))
+        db.commit()
+    except Exception:
+        db.rollback()
 
     return {"message": "Account created successfully!", "email": user.email, "access_token": token, "token_type": "bearer"}
 
@@ -137,8 +145,11 @@ def sign_in(req: UserAuthRequest, request: Request, response: Response, db: Sess
     email = req.email.strip().lower()
     user = db.query(User).filter(User.email == email).first()
     if not user or not verify_password(req.password, user.hashed_password):
-        db.add(AuditLog(user_email=email, action="signin_failed", ip_address=ip))
-        db.commit()
+        try:
+            db.add(AuditLog(user_email=email, action="signin_failed", ip_address=ip))
+            db.commit()
+        except Exception:
+            db.rollback()
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     
     token = create_access_token({"sub": user.email})
@@ -152,8 +163,11 @@ def sign_in(req: UserAuthRequest, request: Request, response: Response, db: Sess
         max_age=settings.jwt_expiration_minutes * 60
     )
 
-    db.add(AuditLog(user_email=user.email, action="signin_success", ip_address=ip))
-    db.commit()
+    try:
+        db.add(AuditLog(user_email=user.email, action="signin_success", ip_address=ip))
+        db.commit()
+    except Exception:
+        db.rollback()
 
     return {"message": "Login successful!", "email": user.email, "access_token": token, "token_type": "bearer"}
 

@@ -26,9 +26,13 @@ class Settings(BaseModel):
     jwt_secret: str = Field(default_factory=lambda: os.getenv("DATAGIT_JWT_SECRET") or "")
     jwt_algorithm: str = "HS256"
     jwt_expiration_minutes: int = 60 * 24 # 24 hours
-    allowed_origins: List[str] = Field(default_factory=lambda: [
-        origin.strip() for origin in os.getenv("DATAGIT_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if origin.strip()
-    ])
+    allowed_origins: List[str] = Field(default_factory=lambda: (
+        [origin.strip() for origin in os.getenv("DATAGIT_CORS_ORIGINS", "").split(",") if origin.strip()]
+        if os.getenv("DATAGIT_CORS_ORIGINS")
+        else ["http://localhost:3000", "http://127.0.0.1:3000"] + (
+            [f"https://{os.getenv('VERCEL_URL')}"] if os.getenv("VERCEL_URL") else []
+        )
+    ))
     auth_rate_limit_per_minute: int = int(os.getenv("DATAGIT_AUTH_RATE_LIMIT", "10"))
 
     def validate_production_security(self) -> None:

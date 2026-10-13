@@ -1,10 +1,10 @@
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import func, or_, desc, asc
-from datagit.storage.models import Repository
+from sqlalchemy import func, or_, desc, asc, text
+from datagit.storage.models import Repository, Commit, Issue
 
 class SearchEngine:
-    """Provides structured filtering and full-text keyword search across crawled repositories."""
+    """Provides structured filtering and FTS5 full-text search across crawled repositories."""
 
     @staticmethod
     def query_repositories(
@@ -18,18 +18,35 @@ class SearchEngine:
         limit: int = 50,
         offset: int = 0
     ) -> Dict[str, Any]:
-        query = db.query(Repository)
+        query = db.query(Repository).filter(Repository.is_deleted.isnot(True))
 
-        # Keyword search across name and description
+        # High-performance search: Try SQLite FTS5 first, fallback to ILIKE
         if keyword and keyword.strip():
-            term = f"%{keyword.strip()}%"
-            query = query.filter(
-                or_(
-                    Repository.name.ilike(term),
-                    Repository.full_name.ilike(term),
-                    Repository.description.ilike(term)
+            clean_kw = keyword.strip()
+            fts_ids = None
+            try:
+                # FTS5 match query with prefix support
+                fts_term = f'"{clean_kw}"*'
+                fts_res = db.execute(
+                    text("SELECT id FROM repositories_fts WHERE repositories_fts MATCH :t LIMIT 500"),
+                    {"t": fts_term}
+                ).fetchall()
+                if fts_res:
+                    fts_ids = [row[0] for row in fts_res]
+            except Exception:
+                fts_ids = None
+
+            if fts_ids is not None:
+                query = query.filter(Repository.id.in_(fts_ids))
+            else:
+                term = f"%{clean_kw}%"
+                query = query.filter(
+                    or_(
+                        Repository.name.ilike(term),
+                        Repository.full_name.ilike(term),
+                        Repository.description.ilike(term)
+                    )
                 )
-            )
 
         if language and language.strip():
             query = query.filter(Repository.language.ilike(language.strip()))
@@ -74,6 +91,7 @@ class SearchEngine:
                 "stars": r.stars,
                 "forks": r.forks,
                 "open_issues": r.open_issues,
+                "is_archived": r.is_archived,
                 "crawled_at": r.crawled_at.isoformat() if r.crawled_at else None
             })
 
@@ -85,16 +103,69 @@ class SearchEngine:
         }
 
     @staticmethod
+    def get_repository_details(db: Session, repo_id: int) -> Optional[Dict[str, Any]]:
+        """Fetches full repository metadata along with recent commits and issues."""
+        repo = db.query(Repository).filter(Repository.id == repo_id, Repository.is_deleted.isnot(True)).first()
+        if not repo:
+            return None
+
+        commits = db.query(Commit).filter(Commit.repo_id == repo.id).order_by(Commit.committed_at.desc()).limit(20).all()
+        issues = db.query(Issue).filter(Issue.repo_id == repo.id).order_by(Issue.created_at.desc()).limit(20).all()
+
+        return {
+            "id": repo.id,
+            "github_id": repo.github_id,
+            "owner": repo.owner,
+            "name": repo.name,
+            "full_name": repo.full_name,
+            "description": repo.description,
+            "url": repo.url,
+            "language": repo.language,
+            "stars": repo.stars,
+            "forks": repo.forks,
+            "open_issues": repo.open_issues,
+            "default_branch": repo.default_branch,
+            "is_fork": repo.is_fork,
+            "is_private": repo.is_private,
+            "is_archived": repo.is_archived,
+            "repo_created_at": repo.repo_created_at.isoformat() if repo.repo_created_at else None,
+            "repo_updated_at": repo.repo_updated_at.isoformat() if repo.repo_updated_at else None,
+            "repo_pushed_at": repo.repo_pushed_at.isoformat() if repo.repo_pushed_at else None,
+            "crawled_at": repo.crawled_at.isoformat() if repo.crawled_at else None,
+            "commits": [{
+                "id": c.id,
+                "sha": c.sha,
+                "author_name": c.author_name,
+                "author_email": c.author_email,
+                "message": c.message,
+                "committed_at": c.committed_at.isoformat() if c.committed_at else None,
+                "url": c.url
+            } for c in commits],
+            "issues": [{
+                "id": i.id,
+                "github_number": i.github_number,
+                "title": i.title,
+                "state": i.state,
+                "author": i.author,
+                "comments_count": i.comments_count,
+                "is_pull_request": i.is_pull_request,
+                "created_at": i.created_at.isoformat() if i.created_at else None,
+                "closed_at": i.closed_at.isoformat() if i.closed_at else None,
+                "url": i.url
+            } for i in issues]
+        }
+
+    @staticmethod
     def get_insights(db: Session) -> Dict[str, Any]:
         """Calculates global metrics and language breakdown."""
-        total_repos = db.query(Repository).count()
-        total_stars = db.query(func.sum(Repository.stars)).scalar() or 0
-        total_forks = db.query(func.sum(Repository.forks)).scalar() or 0
+        total_repos = db.query(Repository).filter(Repository.is_deleted.isnot(True)).count()
+        total_stars = db.query(func.sum(Repository.stars)).filter(Repository.is_deleted.isnot(True)).scalar() or 0
+        total_forks = db.query(func.sum(Repository.forks)).filter(Repository.is_deleted.isnot(True)).scalar() or 0
 
         # Top languages
         top_languages = (
             db.query(Repository.language, func.count(Repository.id).label("count"))
-            .filter(Repository.language.isnot(None), Repository.language != "")
+            .filter(Repository.language.isnot(None), Repository.language != "", Repository.is_deleted.isnot(True))
             .group_by(Repository.language)
             .order_by(desc("count"))
             .limit(10)

@@ -29,8 +29,9 @@ def crawl(target: str, depth: str, pages: int, token: str):
     """Crawl a GitHub user or organization."""
     console.print(f"[bold cyan]Initiating crawl for:[/bold cyan] [yellow]{target}[/yellow] (depth: {depth}, max_pages: {pages})")
     
+    target_type = "repo" if "/" in target else "org"
     db = SessionLocal()
-    job = CrawlJob(target=target, depth=depth, status="queued")
+    job = CrawlJob(target=target, target_type=target_type, depth=depth, status="queued")
     db.add(job)
     db.commit()
     db.refresh(job)
@@ -87,14 +88,24 @@ def search(keyword: str, language: str, owner: str, min_stars: int, limit: int):
 
 @cli.command()
 @click.option("--format", "export_format", default="csv", type=click.Choice(["csv", "json", "parquet"]), help="Output format")
+@click.option("--search", "search_term", default=None, help="Filter export by keyword")
 @click.option("--owner", default=None, help="Filter export by organization/owner")
+@click.option("--language", default=None, help="Filter export by language")
+@click.option("--min-stars", default=0, type=int, help="Minimum stars")
 @click.option("--filename", default="datagit_export", help="Output filename base")
-def export(export_format: str, owner: str, filename: str):
+def export(export_format: str, search_term: str, owner: str, language: str, min_stars: int, filename: str):
     """Export stored repositories to CSV, JSON, or Parquet."""
     db = SessionLocal()
-    query = db.query(Repository)
+    query = db.query(Repository).filter(Repository.is_deleted.isnot(True))
+    if search_term and search_term.strip():
+        term = f"%{search_term.strip()}%"
+        query = query.filter((Repository.name.ilike(term)) | (Repository.full_name.ilike(term)) | (Repository.description.ilike(term)))
     if owner:
-        query = query.filter(Repository.owner.ilike(owner))
+        query = query.filter(Repository.owner.ilike(owner.strip()))
+    if language:
+        query = query.filter(Repository.language.ilike(language.strip()))
+    if min_stars and min_stars > 0:
+        query = query.filter(Repository.stars >= min_stars)
     repos = query.all()
     db.close()
 
@@ -102,18 +113,7 @@ def export(export_format: str, owner: str, filename: str):
         console.print("[yellow]No repositories found matching export criteria.[/yellow]")
         return
 
-    data = [{
-        "Organization": r.owner,
-        "Name": r.name,
-        "Full_Name": r.full_name,
-        "Description": r.description,
-        "Language": r.language,
-        "Stars": r.stars,
-        "Forks": r.forks,
-        "Open_Issues": r.open_issues,
-        "URL": r.url,
-        "Crawled_At": r.crawled_at.isoformat() if r.crawled_at else None
-    } for r in repos]
+    data = [DataExporter.repo_to_dict(r) for r in repos]
 
     if export_format == "csv":
         path = DataExporter.to_csv(data, filename)
@@ -122,6 +122,7 @@ def export(export_format: str, owner: str, filename: str):
     elif export_format == "parquet":
         path = DataExporter.to_parquet(data, filename)
 
+    DataExporter.cleanup_old_exports(max_age_hours=24)
     console.print(f"[bold green][OK] Successfully exported {len(data)} repositories to:[/bold green] [cyan]{path}[/cyan]")
 
 @cli.command()

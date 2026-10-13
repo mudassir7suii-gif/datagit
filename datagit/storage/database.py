@@ -28,8 +28,28 @@ if is_sqlite:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db() -> None:
-    """Initializes tables in database."""
+    """Initializes tables in database and FTS5 full-text index."""
     Base.metadata.create_all(bind=engine)
+    if is_sqlite:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS repositories_fts USING fts5(
+                    id UNINDEXED,
+                    full_name,
+                    name,
+                    description,
+                    tokenize = 'porter unicode61'
+                );
+            """)
+            try:
+                count_fts = conn.exec_driver_sql("SELECT count(*) FROM repositories_fts").scalar() or 0
+                if count_fts == 0:
+                    conn.exec_driver_sql("""
+                        INSERT INTO repositories_fts (id, full_name, name, description)
+                        SELECT id, full_name, name, coalesce(description, '') FROM repositories;
+                    """)
+            except Exception:
+                pass
 
 def get_db() -> Generator[Session, None, None]:
     """Dependency injector for FastAPI and services."""

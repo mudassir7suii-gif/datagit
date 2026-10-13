@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import logging
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from datagit.crawler.github_client import GitHubClient
 from datagit.storage.models import CrawlJob, Repository, Commit, Issue
 from datagit.storage.database import SessionLocal
@@ -40,8 +41,15 @@ class CrawlOrchestrator:
             raw_repos = self.client.fetch_repositories(target, max_pages=effective_pages)
             job.total_found = len(raw_repos)
             saved_count = 0
+            BATCH_SIZE = 50
 
             for r in raw_repos:
+                # Check for job cancellation
+                db.refresh(job)
+                if job.status == "cancelled":
+                    logger.info(f"Crawl job #{job_id} was cancelled by user.")
+                    break
+
                 full_name = r.get("full_name") or f"{target}/{r.get('name')}"
                 gh_id = r.get("id")
                 
@@ -51,9 +59,28 @@ class CrawlOrchestrator:
                     repo = db.query(Repository).filter(Repository.github_id == gh_id).first()
                 if not repo:
                     repo = db.query(Repository).filter(Repository.full_name == full_name).first()
-                if not repo:
+
+                is_new = repo is None
+                if is_new:
                     repo = Repository(full_name=full_name, github_id=gh_id)
                     db.add(repo)
+
+                stars = r.get("stargazers_count", 0)
+                forks = r.get("forks_count", 0)
+                pushed_at_str = r.get("pushed_at")
+                new_hash_raw = f"{full_name}:{stars}:{forks}:{pushed_at_str}"
+                import hashlib
+                new_hash = hashlib.sha256(new_hash_raw.encode("utf-8")).hexdigest()
+
+                # Incremental Update Optimization per Constitution Principle 3:
+                # If repository metadata has not changed since last crawl, skip heavy updates
+                if not is_new and repo.content_hash == new_hash:
+                    repo.crawled_at = datetime.now(timezone.utc)
+                    saved_count += 1
+                    job.items_crawled = saved_count
+                    if saved_count % BATCH_SIZE == 0:
+                        db.commit()
+                    continue
 
                 repo.full_name = full_name
                 repo.github_id = gh_id
@@ -62,19 +89,31 @@ class CrawlOrchestrator:
                 repo.description = r.get("description")
                 repo.url = r.get("html_url", "")
                 repo.language = r.get("language")
-                repo.stars = r.get("stargazers_count", 0)
-                repo.forks = r.get("forks_count", 0)
+                repo.stars = stars
+                repo.forks = forks
                 repo.open_issues = r.get("open_issues_count", 0)
                 repo.default_branch = r.get("default_branch", "main")
                 repo.is_fork = r.get("fork", False)
                 repo.is_private = r.get("private", False)
+                repo.is_archived = r.get("archived", False)
                 repo.repo_created_at = parse_iso(r.get("created_at"))
                 repo.repo_updated_at = parse_iso(r.get("updated_at"))
-                repo.repo_pushed_at = parse_iso(r.get("pushed_at"))
+                repo.repo_pushed_at = parse_iso(pushed_at_str)
                 repo.crawled_at = datetime.now(timezone.utc)
-                repo.content_hash = repo.generate_hash()
+                repo.content_hash = new_hash
                 
                 db.flush() # ensure repo.id exists
+
+                # SQLite FTS sync
+                try:
+                    db.execute(text("INSERT OR REPLACE INTO repositories_fts(id, full_name, name, description) VALUES (:id, :full_name, :name, :description)"), {
+                        "id": repo.id,
+                        "full_name": repo.full_name,
+                        "name": repo.name,
+                        "description": repo.description or ""
+                    })
+                except Exception:
+                    pass
 
                 # Optional Deep Crawls: Commits & Issues
                 if depth in ("commits", "full"):
@@ -121,9 +160,13 @@ class CrawlOrchestrator:
 
                 saved_count += 1
                 job.items_crawled = saved_count
-                db.commit()
+                
+                # Batched database commit per Constitution Principle 3 & 4
+                if saved_count % BATCH_SIZE == 0:
+                    db.commit()
 
-            job.status = "completed"
+            if job.status != "cancelled":
+                job.status = "completed"
             job.completed_at = datetime.now(timezone.utc)
             db.commit()
             return job

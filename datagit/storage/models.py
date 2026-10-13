@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import hashlib
 from typing import Optional
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, BigInteger
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, BigInteger, UniqueConstraint, Float
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -25,7 +25,7 @@ class CrawlJob(Base):
     target = Column(String(255), index=True, nullable=False)
     target_type = Column(String(50), default="org") # org, user, repo
     depth = Column(String(50), default="metadata") # metadata, commits, issues, full
-    status = Column(String(50), default="queued") # queued, running, completed, failed
+    status = Column(String(50), default="queued", index=True) # queued, running, completed, failed, cancelled
     total_found = Column(Integer, default=0)
     items_crawled = Column(Integer, default=0)
     error_message = Column(Text, nullable=True)
@@ -49,6 +49,8 @@ class Repository(Base):
     default_branch = Column(String(100), default="main")
     is_fork = Column(Boolean, default=False)
     is_private = Column(Boolean, default=False)
+    is_archived = Column(Boolean, default=False)
+    is_deleted = Column(Boolean, default=False, index=True)
     
     # Timestamps & Data Freshness
     repo_created_at = Column(DateTime, nullable=True)
@@ -69,6 +71,9 @@ class Repository(Base):
 
 class Commit(Base):
     __tablename__ = "commits"
+    __table_args__ = (
+        UniqueConstraint("repo_id", "sha", name="uq_commit_repo_sha"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     repo_id = Column(Integer, ForeignKey("repositories.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -83,6 +88,9 @@ class Commit(Base):
 
 class Issue(Base):
     __tablename__ = "issues"
+    __table_args__ = (
+        UniqueConstraint("repo_id", "github_number", name="uq_issue_repo_number"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     repo_id = Column(Integer, ForeignKey("repositories.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -97,3 +105,25 @@ class Issue(Base):
     url = Column(String(255), nullable=True)
 
     repository = relationship("Repository", back_populates="issues")
+
+class RateLimitState(Base):
+    __tablename__ = "rate_limit_states"
+
+    id = Column(Integer, primary_key=True)
+    token_masked = Column(String(50), unique=True, index=True, nullable=False)
+    limit = Column(Integer, default=5000)
+    remaining = Column(Integer, default=5000)
+    reset_timestamp = Column(Float, nullable=False)
+    last_used = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc)
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_email = Column(String(255), nullable=True, index=True)
+    action = Column(String(100), nullable=False, index=True) # crawl_started, export_generated, repo_deleted, login_failed
+    target = Column(String(255), nullable=True)
+    details = Column(Text, nullable=True)
+    ip_address = Column(String(45), nullable=True)
+    created_at = Column(DateTime, default=now_utc, index=True)

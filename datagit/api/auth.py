@@ -2,13 +2,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 import bcrypt
 from jose import JWTError, jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from datagit.config import settings
 from datagit.storage.database import get_db
 from datagit.storage.models import User
 
+COOKIE_NAME = "datagit_access_token"
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/signin", auto_error=False)
 
 def hash_password(password: str) -> str:
@@ -30,14 +31,35 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
-def get_current_user(token: Optional[str] = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> Optional[User]:
-    if not token:
+def get_current_user(
+    request: Request,
+    token: Optional[str] = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+) -> Optional[User]:
+    # Check Bearer authorization header first, then fallback to httpOnly cookie
+    auth_token = token or request.cookies.get(COOKIE_NAME)
+    if not auth_token:
         return None
     try:
-        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        payload = jwt.decode(auth_token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
         email: str = payload.get("sub")
         if email is None:
             return None
     except JWTError:
         return None
     return db.query(User).filter(User.email == email).first()
+
+def require_current_user(user: Optional[User] = Depends(get_current_user)) -> User:
+    """Enforces authentication dependency per Constitution Principle 1."""
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required. Please sign in or provide a valid Bearer token.",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Inactive account."
+        )
+    return user

@@ -1,5 +1,6 @@
 import requests
 import time
+import random
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 from datagit.config import settings
@@ -8,7 +9,7 @@ from datagit.core.token_manager import TokenManager
 logger = logging.getLogger("datagit.crawler")
 
 class GitHubClient:
-    """Production-grade GitHub API client respecting Constitution Principle 1 & 6."""
+    """Production-grade GitHub API client respecting Constitution Principle 2 & Rate Limits."""
 
     def __init__(self, token_manager: Optional[TokenManager] = None):
         if token_manager:
@@ -16,13 +17,26 @@ class GitHubClient:
         else:
             self.token_manager = TokenManager(settings.github_tokens)
         self.base_url = settings.github_api_base
+        self.last_request_time: float = 0.0
+        self.min_pacing_seconds: float = 0.25 # 250ms baseline pacing
+
+    def _pace_request(self) -> None:
+        """Enforces inter-request pacing and jitter per Constitution Principle 2."""
+        now = time.time()
+        elapsed = now - self.last_request_time
+        jitter = random.uniform(0.05, 0.15)
+        required_wait = (self.min_pacing_seconds + jitter) - elapsed
+        if required_wait > 0:
+            time.sleep(required_wait)
+        self.last_request_time = time.time()
 
     def _request(self, endpoint: str, params: Optional[Dict[str, Any]] = None, retries: int = 3) -> Tuple[int, Any, Dict[str, str]]:
-        """Executes HTTP request with rate-limit tracking, retries, and token rotation."""
+        """Executes HTTP request with rate-limit tracking, pacing, retries, and token rotation."""
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         params = params or {}
 
         for attempt in range(retries):
+            self._pace_request()
             token_status = self.token_manager.acquire_token()
             headers = {
                 "Accept": "application/vnd.github+json",
@@ -47,16 +61,23 @@ class GitHubClient:
                     except Exception:
                         msg = response.text or ""
 
-                    if "rate limit" in msg.lower() or "secondary rate limit" in msg.lower():
-                        retry_after = 5
-                        try:
-                            retry_after = int(response.headers.get("retry-after", 5))
-                        except (ValueError, TypeError):
-                            pass
-                        token_status.remaining = 0  # Mark exhausted so rotation picks next available token
-                        logger.warning(
-                            f"Rate limit triggered on token {token_status.to_dict()['token_masked']}. Waiting {retry_after}s..."
-                        )
+                    is_secondary = "secondary rate limit" in msg.lower()
+                    is_standard_rate = "rate limit" in msg.lower()
+
+                    if is_secondary or is_standard_rate or response.status_code == 429:
+                        token_status.remaining = 0
+                        if is_secondary:
+                            # Exponential backoff starting at 60s for secondary rate limits
+                            retry_after = max(60, int(response.headers.get("retry-after", 60))) * (2 ** attempt)
+                            logger.warning(
+                                f"GitHub Secondary Rate Limit hit on {token_status.token_masked}. Backing off {retry_after}s..."
+                            )
+                        else:
+                            retry_after = max(5, int(response.headers.get("retry-after", 5)))
+                            logger.warning(
+                                f"Rate limit triggered on {token_status.token_masked}. Waiting {retry_after}s..."
+                            )
+
                         time.sleep(retry_after)
                         continue
 
@@ -82,8 +103,18 @@ class GitHubClient:
         raise RuntimeError(f"Failed to fetch {url} after {retries} retries.")
 
     def detect_target_type(self, target: str) -> Optional[str]:
-        """Determines if a target is an Organization or a User, or returns None if not found."""
+        """Determines if target is a single Repository (owner/repo), Organization, or User."""
         clean_target = target.strip().strip("/")
+        if "/" in clean_target:
+            # Single repository target
+            status, data, _ = self._request(f"/repos/{clean_target}")
+            if status == 200 and isinstance(data, dict):
+                return "Repository"
+            if status == 404:
+                return None
+            if status in (401, 403):
+                raise RuntimeError(f"GitHub API access error ({status}) checking repo '{clean_target}': {data}")
+
         status, data, _ = self._request(f"/users/{clean_target}")
         if status == 404:
             return None
@@ -94,11 +125,17 @@ class GitHubClient:
         return "User"
 
     def fetch_repositories(self, target: str, max_pages: Optional[int] = 10, per_page: int = 100) -> List[Dict[str, Any]]:
-        """Crawls all repositories for an organization or user with full pagination."""
+        """Crawls all repositories for a user, organization, or single repository."""
         clean_target = target.strip().strip("/")
         target_type = self.detect_target_type(clean_target)
         if target_type is None:
-            raise ValueError(f"GitHub account or organization '{clean_target}' was not found (404).")
+            raise ValueError(f"GitHub target '{clean_target}' was not found (404).")
+
+        if target_type == "Repository":
+            status, repo_data, _ = self._request(f"/repos/{clean_target}")
+            if status == 200 and isinstance(repo_data, dict):
+                return [repo_data]
+            raise ValueError(f"Failed to fetch single repository '{clean_target}' (status {status}).")
 
         endpoint = f"/orgs/{clean_target}/repos" if target_type == "Organization" else f"/users/{clean_target}/repos"
         

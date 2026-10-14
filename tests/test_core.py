@@ -2,6 +2,7 @@ import unittest
 import time
 import uuid
 import os
+import json
 from unittest.mock import patch, MagicMock
 from click.testing import CliRunner
 from sqlalchemy.exc import IntegrityError
@@ -230,5 +231,95 @@ class TestDataGitCore(unittest.TestCase):
         # Content hash unchanged -> fetch_commits should NOT be called again
         self.assertEqual(mock_client.fetch_commits.call_count, 1)
 
+    def test_token_encryption_at_rest_and_masking(self):
+        """Technical Plan P0.10: Verifies tokens are encrypted at rest and safely masked."""
+        from datagit.core.encryption import encrypt_token, decrypt_token, mask_token
+        raw_pat = "ghp_super_secret_pat_9876543210"
+        encrypted = encrypt_token(raw_pat)
+        self.assertTrue(encrypted.startswith("enc:v1:"))
+        self.assertNotEqual(raw_pat, encrypted)
+
+        # Decrypt
+        decrypted = decrypt_token(encrypted)
+        self.assertEqual(raw_pat, decrypted)
+
+        # Masking: never reveals raw secret
+        masked = mask_token(raw_pat)
+        self.assertNotIn("super_secret_pat", masked)
+        self.assertTrue(masked.startswith("ghp_.."))
+
+        # TokenStatus integration
+        ts = TokenStatus(raw_pat)
+        self.assertTrue(ts.encrypted_token.startswith("enc:v1:"))
+        self.assertEqual(ts.token, raw_pat)
+        self.assertNotIn("super_secret_pat", ts.token_masked)
+
+    def test_repository_health_scoring(self):
+        """Epic P3.2: Standardized repository vitality and health scoring."""
+        from datagit.analytics.scoring import calculate_repository_health
+        from datetime import datetime, timezone, timedelta
+
+        # 1. Thriving repo: pushed today, 50k stars, low open issues ratio
+        health_thriving = calculate_repository_health(
+            repo_pushed_at=datetime.now(timezone.utc),
+            stars=50000,
+            forks=12000,
+            open_issues=25,
+            is_archived=False,
+            is_deleted=False,
+            has_description=True
+        )
+        self.assertEqual(health_thriving["label"], "Thriving")
+        self.assertGreaterEqual(health_thriving["score"], 80)
+        self.assertEqual(health_thriving["color"], "emerald")
+
+        # 2. Dormant repo: pushed 3 years ago, 0 stars, archived
+        old_date = datetime.now(timezone.utc) - timedelta(days=1100)
+        health_dormant = calculate_repository_health(
+            repo_pushed_at=old_date,
+            stars=0,
+            forks=0,
+            open_issues=50,
+            is_archived=True,
+            is_deleted=False,
+            has_description=False
+        )
+        self.assertEqual(health_dormant["label"], "Dormant")
+        self.assertLess(health_dormant["score"], 40)
+        self.assertEqual(health_dormant["color"], "red")
+
+    def test_rag_json_chunks_export(self):
+        """Epic P3.2: LangChain / LlamaIndex vector chunks export format."""
+        from datagit.storage.exporters import DataExporter
+        sample_repo = Repository(
+            owner="langchain-ai",
+            name="langchain",
+            full_name="langchain-ai/langchain",
+            description="Building applications with LLMs through composability",
+            language="Python",
+            stars=95000,
+            forks=15000,
+            open_issues=450,
+            url="https://github.com/langchain-ai/langchain"
+        )
+        chunk = DataExporter.repo_to_rag_chunk(sample_repo)
+        self.assertIn("id", chunk)
+        self.assertIn("text", chunk)
+        self.assertIn("metadata", chunk)
+        self.assertEqual(chunk["metadata"]["full_name"], "langchain-ai/langchain")
+        self.assertEqual(chunk["metadata"]["language"], "Python")
+        self.assertIn("Stars: 95000", chunk["text"])
+
+        # Test to_rag_json file generation
+        tmp_export = DataExporter.to_rag_json([chunk["metadata"]], "test_rag_export")
+        self.assertTrue(os.path.exists(tmp_export))
+        with open(tmp_export, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0]["metadata"]["full_name"], "langchain-ai/langchain")
+        if os.path.exists(tmp_export):
+            os.remove(tmp_export)
+
 if __name__ == "__main__":
     unittest.main()
+

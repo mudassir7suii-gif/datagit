@@ -1,4 +1,5 @@
 import unittest
+import uuid
 from fastapi.testclient import TestClient
 from datagit.api.app import app
 from datagit.storage.database import SessionLocal
@@ -8,7 +9,7 @@ class TestAPIEndpoints(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(app)
-        cls.email = "tester_spec@datagit.dev"
+        cls.email = f"tester_{uuid.uuid4().hex[:8]}@datagit.dev"
         cls.password = "strong_password_99"
 
         # Ensure account exists and retrieve token
@@ -181,6 +182,300 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertFalse(limiter.check("10.0.0.1"))
         # Another IP should not be locked out
         self.assertTrue(limiter.check("10.0.0.2"))
+
+    def test_job_rerun_endpoint(self):
+        """Spec 4.2: Tests idempotent job re-enqueueing."""
+        r_create = self.client.post(
+            "/api/jobs",
+            json={"target": "pallets/flask", "depth": "metadata", "max_pages": 1},
+            headers=self.auth_headers
+        )
+        self.assertEqual(r_create.status_code, 200)
+        job_id = r_create.json()["job_id"]
+
+        r_rerun = self.client.post(f"/api/jobs/{job_id}/rerun", headers=self.auth_headers)
+        self.assertEqual(r_rerun.status_code, 200)
+        rerun_data = r_rerun.json()
+        self.assertIn("job_id", rerun_data)
+        self.assertEqual(rerun_data["target"], "pallets/flask")
+        self.assertEqual(rerun_data["original_job_id"], job_id)
+
+    def test_plans_endpoint(self):
+        """Spec 4.7: Tests transparent pricing and quotas endpoint."""
+        r = self.client.get("/api/plans")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertIn("plans", data)
+        self.assertTrue(len(data["plans"]) >= 3)
+        plan_ids = [p["id"] for p in data["plans"]]
+        self.assertIn("free", plan_ids)
+        self.assertIn("pro", plan_ids)
+
+    def test_account_deletion_gdpr(self):
+        """Spec 4.1: Tests privacy compliance and self-serve account deletion."""
+        temp_email = f"to_delete_{uuid.uuid4().hex[:8]}@datagit.dev"
+        temp_pass = "temporary_password_123"
+        r_signup = self.client.post("/api/auth/signup", json={"email": temp_email, "password": temp_pass})
+        self.assertEqual(r_signup.status_code, 200)
+        token = r_signup.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # Delete account
+        r_del = self.client.delete("/api/auth/account", headers=headers)
+        self.assertEqual(r_del.status_code, 200)
+        self.assertIn("successfully deleted", r_del.json()["message"])
+
+        # Signing in again fails with 401
+        r_signin = self.client.post("/api/auth/signin", json={"email": temp_email, "password": temp_pass})
+        self.assertEqual(r_signin.status_code, 401)
+
+    def test_account_lockout_after_consecutive_failed_attempts(self):
+        """Technical Plan P0.4: Verifies account lockout on 5 consecutive failed sign-in attempts."""
+        lockout_email = f"lockout_{uuid.uuid4().hex[:8]}@datagit.dev"
+        correct_pass = "correct_password_123"
+        wrong_pass = "wrong_password_999"
+
+        # Register account
+        r_up = self.client.post("/api/auth/signup", json={"email": lockout_email, "password": correct_pass})
+        self.assertEqual(r_up.status_code, 200)
+
+        # 4 consecutive bad attempts should return 401
+        for _ in range(4):
+            r = self.client.post("/api/auth/signin", json={"email": lockout_email, "password": wrong_pass})
+            self.assertEqual(r.status_code, 401)
+
+        # 5th bad attempt triggers lockout
+        r5 = self.client.post("/api/auth/signin", json={"email": lockout_email, "password": wrong_pass})
+        self.assertEqual(r5.status_code, 401)
+
+        # 6th attempt (even with CORRECT password) is rejected with 423 Locked
+        r6 = self.client.post("/api/auth/signin", json={"email": lockout_email, "password": correct_pass})
+        self.assertEqual(r6.status_code, 423)
+        self.assertIn("temporarily locked", r6.json().get("detail", ""))
+
+    def test_audit_log_endpoint(self):
+        """Technical Plan P0.11: Verifies audit log inspection endpoint."""
+        # Unauthenticated request fails closed with 401
+        unauth = TestClient(app)
+        self.assertEqual(unauth.get("/api/audit").status_code, 401)
+
+        # Authenticated request succeeds
+        r = self.client.get("/api/audit", headers=self.auth_headers)
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertIn("total", data)
+        self.assertIn("items", data)
+        self.assertTrue(isinstance(data["items"], list))
+
+    def test_api_key_lifecycle_and_authentication(self):
+        """Epic P2.2: Tests API key creation, authentication, listing, and revocation."""
+        # 1. Create API key
+        r_create = self.client.post(
+            "/api/auth/api-keys",
+            json={"name": "CI Deployment Key"},
+            headers=self.auth_headers
+        )
+        self.assertEqual(r_create.status_code, 200)
+        key_data = r_create.json()
+        key_id = key_data["id"]
+        raw_key = key_data["api_key"]
+        self.assertTrue(raw_key.startswith("dg_live_"))
+
+        # 2. Authenticate using Bearer dg_live_...
+        api_client = TestClient(app)
+        r_auth_bearer = api_client.get("/api/jobs", headers={"Authorization": f"Bearer {raw_key}"})
+        self.assertEqual(r_auth_bearer.status_code, 200)
+
+        # 3. Authenticate using X-API-Key header
+        r_auth_header = api_client.get("/api/jobs", headers={"X-API-Key": raw_key})
+        self.assertEqual(r_auth_header.status_code, 200)
+
+        # 4. List keys
+        r_list = self.client.get("/api/auth/api-keys", headers=self.auth_headers)
+        self.assertEqual(r_list.status_code, 200)
+        items = r_list.json()["items"]
+        self.assertTrue(any(k["id"] == key_id for k in items))
+
+        # 5. Revoke key
+        r_revoke = self.client.delete(f"/api/auth/api-keys/{key_id}", headers=self.auth_headers)
+        self.assertEqual(r_revoke.status_code, 200)
+
+        # 6. Request with revoked key must fail with 401
+        r_revoked_fail = api_client.get("/api/jobs", headers={"X-API-Key": raw_key})
+        self.assertEqual(r_revoked_fail.status_code, 401)
+
+    def test_workspaces_lifecycle(self):
+        """Epic P1.1: Tests multi-tenant workspace listing and creation."""
+        # 1. Listing auto-creates personal workspace
+        r_list = self.client.get("/api/workspaces", headers=self.auth_headers)
+        self.assertEqual(r_list.status_code, 200)
+        items = r_list.json()["items"]
+        self.assertTrue(len(items) >= 1)
+        self.assertTrue(any(w["is_owner"] for w in items))
+
+        # 2. Create team workspace
+        r_create = self.client.post(
+            "/api/workspaces",
+            json={"name": f"Analytics Team {uuid.uuid4().hex[:6]}"},
+            headers=self.auth_headers
+        )
+        self.assertEqual(r_create.status_code, 200)
+        new_ws = r_create.json()
+        self.assertIn("id", new_ws)
+        self.assertIn("slug", new_ws)
+
+    def test_webhooks_lifecycle(self):
+        """Epic P3.2: Tests webhook creation, listing, signature ping, and deletion."""
+        # 1. Create webhook
+        r_create = self.client.post(
+            "/api/webhooks",
+            json={"url": "https://example.com/webhook-receiver", "events": "job.completed,export.ready"},
+            headers=self.auth_headers
+        )
+        self.assertEqual(r_create.status_code, 200)
+        hook_data = r_create.json()
+        hook_id = hook_data["id"]
+        self.assertTrue(hook_data["secret"].startswith("whsec_"))
+
+        # 2. List webhooks
+        r_list = self.client.get("/api/webhooks", headers=self.auth_headers)
+        self.assertEqual(r_list.status_code, 200)
+        hooks = r_list.json()["items"]
+        self.assertTrue(any(h["id"] == hook_id for h in hooks))
+
+        # 3. Test webhook ping
+        r_test = self.client.post(f"/api/webhooks/{hook_id}/test", headers=self.auth_headers)
+        self.assertEqual(r_test.status_code, 200)
+        self.assertIn("signature", r_test.json())
+
+        # 4. Delete webhook
+        r_del = self.client.delete(f"/api/webhooks/{hook_id}", headers=self.auth_headers)
+        self.assertEqual(r_del.status_code, 200)
+
+    def test_export_artifacts_and_signed_download(self):
+        """Epic P1.3: Tests object storage export generation, artifact listing, and public signed download."""
+        # 1. Generate export artifact
+        r_gen = self.client.post(
+            "/api/export/generate",
+            json={"format": "csv", "min_stars": 0},
+            headers=self.auth_headers
+        )
+        self.assertEqual(r_gen.status_code, 200)
+        artifact = r_gen.json()
+        download_token = artifact["download_token"]
+        download_url = artifact["download_url"]
+        self.assertIsNotNone(download_token)
+        self.assertIn(download_token, download_url)
+
+        # 2. List artifacts
+        r_list = self.client.get("/api/export/artifacts", headers=self.auth_headers)
+        self.assertEqual(r_list.status_code, 200)
+        items = r_list.json()["items"]
+        self.assertTrue(any(a["download_url"] == download_url for a in items))
+
+        # 3. Public download via signed token (no auth headers required)
+        public_client = TestClient(app)
+        r_down = public_client.get(f"/api/export/download/{download_token}")
+        self.assertEqual(r_down.status_code, 200)
+        self.assertIn("attachment;", r_down.headers.get("content-disposition", ""))
+        self.assertIn("Organization", r_down.text)
+
+    def test_token_pool_endpoints(self):
+        """Epic P2.1: Tests token pool summary and addition."""
+        # List tokens
+        r_list = self.client.get("/api/tokens", headers=self.auth_headers)
+        self.assertEqual(r_list.status_code, 200)
+        data = r_list.json()
+        self.assertIn("active_tokens_count", data)
+
+        # Add dummy token
+        r_add = self.client.post(
+            "/api/tokens/add",
+            json={"token": "ghp_mocktesttoken1234567890abcdefghijklmn"},
+            headers=self.auth_headers
+        )
+        self.assertEqual(r_add.status_code, 200)
+        self.assertIn("token_masked", r_add.json())
+
+    def test_saved_searches_lifecycle(self):
+        """Epic P3.2: Tests saved search creation, listing, and deletion."""
+        # 1. Create saved search
+        payload = {
+            "name": "High Star Python Repos",
+            "query_params": {"language": "Python", "min_stars": 500},
+            "notify_on_new": True
+        }
+        r_create = self.client.post("/api/saved-searches", json=payload, headers=self.auth_headers)
+        self.assertEqual(r_create.status_code, 200)
+        search_data = r_create.json()
+        search_id = search_data["id"]
+        self.assertEqual(search_data["name"], "High Star Python Repos")
+        self.assertTrue(search_data["notify_on_new"])
+
+        # 2. List saved searches
+        r_list = self.client.get("/api/saved-searches", headers=self.auth_headers)
+        self.assertEqual(r_list.status_code, 200)
+        items = r_list.json()["items"]
+        self.assertTrue(any(s["id"] == search_id for s in items))
+
+        # 3. Delete saved search
+        r_del = self.client.delete(f"/api/saved-searches/{search_id}", headers=self.auth_headers)
+        self.assertEqual(r_del.status_code, 200)
+
+        # 4. Confirm deleted
+        r_list2 = self.client.get("/api/saved-searches", headers=self.auth_headers)
+        self.assertFalse(any(s["id"] == search_id for s in r_list2.json()["items"]))
+
+    def test_billing_checkout_and_webhook(self):
+        """Epic P3.1: Tests Stripe billing checkout simulation and webhook event dispatch."""
+        # 1. Checkout upgrade to pro
+        r_checkout = self.client.post(
+            "/api/billing/checkout",
+            json={"plan": "pro"},
+            headers=self.auth_headers
+        )
+        self.assertEqual(r_checkout.status_code, 200)
+        self.assertEqual(r_checkout.json()["plan"], "pro")
+
+        # Verify user plan is now pro
+        r_profile = self.client.get("/api/auth/me", headers=self.auth_headers)
+        self.assertEqual(r_profile.json()["plan"], "pro")
+        self.assertEqual(r_profile.json()["monthly_crawls_limit"], 2000)
+
+        # 2. Test Stripe Webhook: Subscription cancellation downgrades to free
+        webhook_payload = {
+            "type": "customer.subscription.deleted",
+            "data": {
+                "object": {
+                    "customer_email": self.email
+                }
+            }
+        }
+        r_hook = self.client.post("/api/billing/webhook", json=webhook_payload)
+        self.assertEqual(r_hook.status_code, 200)
+
+        # Verify user plan returned to free
+        r_profile2 = self.client.get("/api/auth/me", headers=self.auth_headers)
+        self.assertEqual(r_profile2.json()["plan"], "free")
+        self.assertEqual(r_profile2.json()["monthly_crawls_limit"], 50)
+
+    def test_rag_json_export_endpoints(self):
+        """Epic P3.2: Tests RAG JSON vector chunks direct stream and artifact generation."""
+        # 1. Direct stream
+        r_stream = self.client.get("/api/export?format=rag_json", headers=self.auth_headers)
+        self.assertEqual(r_stream.status_code, 200)
+        self.assertEqual(r_stream.headers.get("content-type"), "application/json")
+
+        # 2. Generate artifact
+        r_gen = self.client.post(
+            "/api/export/generate",
+            json={"format": "rag_json"},
+            headers=self.auth_headers
+        )
+        self.assertEqual(r_gen.status_code, 200)
+        data = r_gen.json()
+        self.assertEqual(data["format"], "rag_json")
+        self.assertTrue(data["filename"].endswith(".rag.json"))
 
 if __name__ == "__main__":
     unittest.main()

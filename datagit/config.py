@@ -86,24 +86,20 @@ class Settings(BaseModel):
     auth_rate_limit_per_minute: int = int(os.getenv("DATAGIT_AUTH_RATE_LIMIT", "10"))
 
     def validate_production_security(self) -> None:
-        """Fail-closed check with safe fallback per DataGit Constitution Principle 1."""
+        """Fail-closed check per DataGit Constitution Principle 1."""
         if not self.jwt_secret:
-            fallback_key = "datagit-dev-secret-key-change-in-prod-772911"
             if not self.debug:
-                warnings.warn(
-                    "SECURITY WARNING: 'DATAGIT_JWT_SECRET' is not set in production. Using fallback secret for compatibility. "
-                    "For secure production deployments, configure DATAGIT_JWT_SECRET in your environment variables!",
-                    UserWarning,
-                    stacklevel=2
+                raise RuntimeError(
+                    "CRITICAL SECURITY CONFIGURATION ERROR: 'DATAGIT_JWT_SECRET' environment variable is required "
+                    "when running in production mode (DATAGIT_DEBUG=false). Set DATAGIT_JWT_SECRET before starting DataGit."
                 )
-                self.jwt_secret = fallback_key
-            else:
-                warnings.warn(
-                    "Running in DEBUG mode with automatic dev JWT secret. Set DATAGIT_JWT_SECRET before deploying to production.",
-                    UserWarning,
-                    stacklevel=2
-                )
-                self.jwt_secret = fallback_key
+            # Dev mode fallback
+            warnings.warn(
+                "Running in DEBUG mode with automatic dev JWT secret. Set DATAGIT_JWT_SECRET before deploying to production.",
+                UserWarning,
+                stacklevel=2
+            )
+            self.jwt_secret = "datagit-dev-secret-key-change-in-prod-772911"
 
 settings = Settings()
 settings.validate_production_security()

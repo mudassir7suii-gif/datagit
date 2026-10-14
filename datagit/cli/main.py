@@ -1,4 +1,5 @@
 import sys
+from typing import Optional
 import click
 import csv
 from rich.console import Console
@@ -217,6 +218,102 @@ def import_csv(csv_path: str):
         console.print(f"[bold green][OK] Import finished![/bold green] Added {count:,} repositories to database.")
     except Exception as e:
         console.print(f"[bold red][FAIL] Import error:[/bold red] {e}")
+    finally:
+        db.close()
+
+@cli.command()
+@click.option("--email", prompt="Email address", help="User account email")
+@click.option("--password", prompt=True, hide_input=True, help="User account password")
+@click.option("--api-url", default="http://127.0.0.1:8000", help="DataGit API Gateway URL")
+def login(email: str, password: str, api_url: str):
+    """Authenticate with DataGit and store session credentials locally for CI/scripting."""
+    import requests
+    from pathlib import Path
+    import json
+
+    console.print(f"[bold cyan]Authenticating with DataGit API at {api_url}...[/bold cyan]")
+    try:
+        res = requests.post(
+            f"{api_url.rstrip('/')}/api/auth/signin",
+            json={"email": email.strip(), "password": password},
+            timeout=10
+        )
+        if res.status_code != 200:
+            console.print(f"[bold red][FAIL] Authentication failed ({res.status_code}):[/bold red] {res.text}")
+            sys.exit(1)
+        
+        data = res.json()
+        token = data.get("access_token")
+        creds_dir = Path.home() / ".datagit"
+        creds_dir.mkdir(parents=True, exist_ok=True)
+        creds_file = creds_dir / "credentials.json"
+        with open(creds_file, "w", encoding="utf-8") as f:
+            json.dump({"email": email.strip(), "access_token": token, "api_url": api_url}, f, indent=2)
+        
+        console.print(f"[bold green][OK] Successfully authenticated as {email}![/bold green]")
+        console.print(f"[dim]Credentials saved to {creds_file}[/dim]")
+    except Exception as e:
+        console.print(f"[bold red][FAIL] Connection error:[/bold red] {e}")
+        sys.exit(1)
+
+@cli.command()
+@click.option("--limit", default=20, type=int, help="Maximum jobs to list")
+@click.option("--cancel", "cancel_id", default=None, type=int, help="Job ID to cancel")
+@click.option("--rerun", "rerun_id", default=None, type=int, help="Job ID to re-enqueue")
+def jobs(limit: int, cancel_id: Optional[int], rerun_id: Optional[int]):
+    """Inspect, cancel, or re-run background crawl jobs."""
+    db = SessionLocal()
+    try:
+        if cancel_id:
+            job = db.query(CrawlJob).filter(CrawlJob.id == cancel_id).first()
+            if not job:
+                console.print(f"[bold red]Job #{cancel_id} not found.[/bold red]")
+                return
+            job.status = "cancelled"
+            job.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            console.print(f"[bold green]Job #{cancel_id} has been cancelled.[/bold green]")
+            return
+
+        if rerun_id:
+            job = db.query(CrawlJob).filter(CrawlJob.id == rerun_id).first()
+            if not job:
+                console.print(f"[bold red]Job #{rerun_id} not found.[/bold red]")
+                return
+            new_job = CrawlJob(
+                target=job.target,
+                target_type=job.target_type,
+                depth=job.depth,
+                status="queued"
+            )
+            db.add(new_job)
+            db.commit()
+            db.refresh(new_job)
+            console.print(f"[bold green]Job #{rerun_id} re-enqueued as Job #{new_job.id} for {new_job.target}.[/bold green]")
+            return
+
+        job_list = db.query(CrawlJob).order_by(CrawlJob.id.desc()).limit(limit).all()
+        table = Table(title=f"Background Crawl Jobs (Latest {len(job_list)})")
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Target", style="bold white")
+        table.add_column("Type", style="dim")
+        table.add_column("Depth", style="magenta")
+        table.add_column("Status", style="yellow")
+        table.add_column("Progress", justify="right")
+        table.add_column("Started", style="dim")
+
+        for j in job_list:
+            status_style = "green" if j.status == "completed" else "yellow" if j.status in ("queued", "running") else "red"
+            table.add_row(
+                f"#{j.id}",
+                j.target,
+                j.target_type,
+                j.depth,
+                f"[{status_style}]{j.status}[/{status_style}]",
+                f"{j.items_crawled} / {j.total_found if j.total_found > 0 else '-'}",
+                j.created_at.strftime("%Y-%m-%d %H:%M") if j.created_at else "-"
+            )
+        console.print(table)
     finally:
         db.close()
 

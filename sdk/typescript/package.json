@@ -1,0 +1,26 @@
+{
+  "name": "@datagit/sdk",
+  "version": "0.2.0",
+  "description": "Official TypeScript & JavaScript SDK for DataGit Developer SaaS Platform",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "datagit",
+    "github",
+    "crawler",
+    "scraper",
+    "dataset",
+    "ai",
+    "rag",
+    "vector"
+  ],
+  "author": "DataGit Team",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

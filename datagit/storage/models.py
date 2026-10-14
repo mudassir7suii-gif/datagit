@@ -17,11 +17,59 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=now_utc)
     is_active = Column(Boolean, default=True)
+    failed_login_attempts = Column(Integer, default=0)
+    locked_until = Column(DateTime, nullable=True)
+    plan = Column(String(50), default="free")
+
+    owned_workspaces = relationship("Workspace", back_populates="owner", cascade="all, delete-orphan", foreign_keys="Workspace.owner_id")
+
+class Workspace(Base):
+    __tablename__ = "workspaces"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    slug = Column(String(100), unique=True, index=True, nullable=False)
+    owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    created_at = Column(DateTime, default=now_utc)
+
+    owner = relationship("User", foreign_keys=[owner_id], back_populates="owned_workspaces")
+    members = relationship("WorkspaceMember", back_populates="workspace", cascade="all, delete-orphan")
+
+class WorkspaceMember(Base):
+    __tablename__ = "workspace_members"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "user_id", name="uq_workspace_member"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    workspace_id = Column(Integer, ForeignKey("workspaces.id", ondelete="CASCADE"), index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    role = Column(String(50), default="member") # owner, admin, member
+    created_at = Column(DateTime, default=now_utc)
+
+    workspace = relationship("Workspace", back_populates="members")
+    user = relationship("User", backref="workspace_memberships")
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    workspace_id = Column(Integer, ForeignKey("workspaces.id", ondelete="SET NULL"), index=True, nullable=True)
+    name = Column(String(100), nullable=False)
+    key_prefix = Column(String(16), index=True, nullable=False)
+    key_hash = Column(String(64), unique=True, index=True, nullable=False)
+    created_at = Column(DateTime, default=now_utc)
+    last_used_at = Column(DateTime, nullable=True)
+    is_revoked = Column(Boolean, default=False, index=True)
+
+    user = relationship("User", backref="api_keys")
 
 class CrawlJob(Base):
     __tablename__ = "crawl_jobs"
 
     id = Column(Integer, primary_key=True, index=True)
+    workspace_id = Column(Integer, ForeignKey("workspaces.id", ondelete="SET NULL"), index=True, nullable=True)
     target = Column(String(255), index=True, nullable=False)
     target_type = Column(String(50), default="org") # org, user, repo
     depth = Column(String(50), default="metadata") # metadata, commits, issues, full
@@ -36,6 +84,7 @@ class Repository(Base):
     __tablename__ = "repositories"
 
     id = Column(Integer, primary_key=True, index=True)
+    workspace_id = Column(Integer, ForeignKey("workspaces.id", ondelete="SET NULL"), index=True, nullable=True)
     github_id = Column(BigInteger, unique=True, index=True, nullable=True)
     owner = Column(String(100), index=True, nullable=False)
     name = Column(String(150), index=True, nullable=False)
@@ -127,3 +176,53 @@ class AuditLog(Base):
     details = Column(Text, nullable=True)
     ip_address = Column(String(45), nullable=True)
     created_at = Column(DateTime, default=now_utc, index=True)
+
+class Webhook(Base):
+    __tablename__ = "webhooks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    workspace_id = Column(Integer, ForeignKey("workspaces.id", ondelete="SET NULL"), index=True, nullable=True)
+    url = Column(String(500), nullable=False)
+    secret = Column(String(100), nullable=False)
+    events = Column(String(255), default="job.completed,job.failed")
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=now_utc)
+    last_triggered_at = Column(DateTime, nullable=True)
+    failure_count = Column(Integer, default=0)
+
+    user = relationship("User", backref="webhooks")
+
+class ExportArtifact(Base):
+    __tablename__ = "export_artifacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    workspace_id = Column(Integer, ForeignKey("workspaces.id", ondelete="SET NULL"), index=True, nullable=True)
+    filename = Column(String(255), nullable=False)
+    storage_path = Column(String(500), nullable=False)
+    storage_backend = Column(String(50), default="local") # local, s3
+    format = Column(String(20), nullable=False) # csv, json, parquet
+    file_size = Column(BigInteger, default=0)
+    checksum_sha256 = Column(String(64), nullable=True)
+    download_token = Column(String(64), unique=True, index=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=now_utc)
+
+    user = relationship("User", backref="export_artifacts")
+
+
+class SavedSearch(Base):
+    __tablename__ = "saved_searches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    workspace_id = Column(Integer, ForeignKey("workspaces.id", ondelete="SET NULL"), index=True, nullable=True)
+    name = Column(String(100), nullable=False)
+    query_params = Column(Text, nullable=False)  # JSON-encoded filters: keyword, language, min_stars, etc.
+    notify_on_new = Column(Boolean, default=False)
+    last_checked_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=now_utc)
+
+    user = relationship("User", backref="saved_searches")
+

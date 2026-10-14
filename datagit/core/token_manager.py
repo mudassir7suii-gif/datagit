@@ -1,28 +1,48 @@
 import time
+import os
+import json
 import threading
-import hashlib
 import requests
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any
+
 from datagit.storage.models import RateLimitState
 from datagit.storage.database import SessionLocal
+from datagit.core.encryption import encrypt_token, decrypt_token, mask_token
 
 class TokenStatus:
+    """Encapsulates a GitHub API token status with at-rest encryption and safe masking."""
+    
     def __init__(self, token: Optional[str]):
-        self.token = token
+        if token and token.strip():
+            plain = token.strip()
+            self._encrypted_token: Optional[str] = encrypt_token(plain)
+            self._plain_cache: Optional[str] = plain
+        else:
+            self._encrypted_token = None
+            self._plain_cache = None
+
         self.limit: int = 5000 if token else 60
         self.remaining: int = 5000 if token else 60
         self.reset_timestamp: float = time.time() + 3600
         self.last_used: float = 0.0
 
     @property
+    def token(self) -> Optional[str]:
+        """Returns the decrypted token for authenticated outbound requests."""
+        if not self._encrypted_token:
+            return None
+        if self._plain_cache is None:
+            self._plain_cache = decrypt_token(self._encrypted_token)
+        return self._plain_cache
+
+    @property
+    def encrypted_token(self) -> Optional[str]:
+        return self._encrypted_token
+
+    @property
     def token_masked(self) -> str:
-        if not self.token:
-            return "Unauthenticated"
-        thash = hashlib.sha256(self.token.encode()).hexdigest()[:8]
-        if len(self.token) > 8:
-            return f"{self.token[:4]}..{thash}..{self.token[-4:]}"
-        return f"{self.token}_{thash}"
+        return mask_token(self.token)
 
     @property
     def is_exhausted(self) -> bool:
@@ -46,19 +66,109 @@ class TokenStatus:
             "is_exhausted": self.is_exhausted
         }
 
+
+class RateLimitStore:
+    """Abstract interface for shared rate-limit state."""
+    def get_state(self, token_masked: str) -> Optional[Dict[str, Any]]:
+        raise NotImplementedError
+
+    def set_state(self, token_masked: str, limit: int, remaining: int, reset_timestamp: float) -> None:
+        raise NotImplementedError
+
+
+class RedisRateLimitStore(RateLimitStore):
+    """Distributed Redis-backed rate-limit store per Technical Plan P0.6."""
+
+    def __init__(self, redis_url: str):
+        import redis
+        self.client = redis.Redis.from_url(redis_url, decode_responses=True)
+
+    def get_state(self, token_masked: str) -> Optional[Dict[str, Any]]:
+        try:
+            val = self.client.get(f"datagit:ratelimit:{token_masked}")
+            if val:
+                return json.loads(val)
+        except Exception:
+            pass
+        return None
+
+    def set_state(self, token_masked: str, limit: int, remaining: int, reset_timestamp: float) -> None:
+        try:
+            data = {"limit": limit, "remaining": remaining, "reset_timestamp": reset_timestamp}
+            ttl = max(60, int(reset_timestamp - time.time()) + 120)
+            self.client.setex(f"datagit:ratelimit:{token_masked}", ttl, json.dumps(data))
+        except Exception:
+            pass
+
+
+class DatabaseRateLimitStore(RateLimitStore):
+    """SQL-backed persistent rate-limit store for local development and fallback."""
+
+    def get_state(self, token_masked: str) -> Optional[Dict[str, Any]]:
+        try:
+            db = SessionLocal()
+            state = db.query(RateLimitState).filter(RateLimitState.token_masked == token_masked).first()
+            if state:
+                result = {
+                    "limit": state.limit,
+                    "remaining": state.remaining,
+                    "reset_timestamp": state.reset_timestamp
+                }
+                db.close()
+                return result
+            db.close()
+        except Exception:
+            pass
+        return None
+
+    def set_state(self, token_masked: str, limit: int, remaining: int, reset_timestamp: float) -> None:
+        try:
+            db = SessionLocal()
+            state = db.query(RateLimitState).filter(RateLimitState.token_masked == token_masked).first()
+            if not state:
+                state = RateLimitState(
+                    token_masked=token_masked,
+                    limit=limit,
+                    remaining=remaining,
+                    reset_timestamp=reset_timestamp
+                )
+                db.add(state)
+            else:
+                state.limit = limit
+                state.remaining = remaining
+                state.reset_timestamp = reset_timestamp
+                state.last_used = datetime.now(timezone.utc)
+            db.commit()
+            db.close()
+        except Exception:
+            pass
+
+
 class TokenManager:
-    """Manages GitHub API tokens with persistent database state across workers per Constitution."""
+    """Manages GitHub API tokens with shared Redis/DB state across workers per Constitution & Plan."""
     
     def __init__(self, initial_tokens: Optional[List[str]] = None, sync_live: bool = True):
         self._lock = threading.Lock()
         self.tokens: List[TokenStatus] = []
+        
+        # Initialize Rate Limit Store (Redis if available, else DB)
+        redis_url = os.getenv("DATAGIT_REDIS_URL") or os.getenv("REDIS_URL")
+        self.store: RateLimitStore = None
+        if redis_url:
+            try:
+                self.store = RedisRateLimitStore(redis_url)
+            except Exception:
+                self.store = DatabaseRateLimitStore()
+        else:
+            self.store = DatabaseRateLimitStore()
+
         if initial_tokens:
             for t in initial_tokens:
                 self.add_token(t)
         if not self.tokens:
             self.tokens.append(TokenStatus(None))
 
-        # Restore from DB and sync with GitHub live rate_limit API
+        # Restore from store and sync with GitHub live rate_limit API
         self.load_from_db()
         if sync_live:
             self.sync_with_github_api()
@@ -74,41 +184,29 @@ class TokenManager:
             self.tokens.append(TokenStatus(token))
 
     def load_from_db(self) -> None:
-        """Hydrates token quotas from persistent DB to coordinate across workers."""
+        """Hydrates token quotas from store (Redis or DB) to coordinate across workers."""
         try:
-            db = SessionLocal()
             now = time.time()
             for t in self.tokens:
-                state = db.query(RateLimitState).filter(RateLimitState.token_masked == t.token_masked).first()
+                state = self.store.get_state(t.token_masked)
                 if state:
-                    if state.reset_timestamp > now:
-                        t.remaining = state.remaining
-                        t.limit = state.limit
-                        t.reset_timestamp = state.reset_timestamp
-            db.close()
+                    reset_ts = state.get("reset_timestamp", 0)
+                    if reset_ts > now:
+                        t.remaining = state.get("remaining", t.remaining)
+                        t.limit = state.get("limit", t.limit)
+                        t.reset_timestamp = reset_ts
         except Exception:
             pass
 
     def persist_to_db(self, token_status: TokenStatus) -> None:
-        """Persists updated rate limit state to the database."""
+        """Persists updated rate limit state to the shared store."""
         try:
-            db = SessionLocal()
-            state = db.query(RateLimitState).filter(RateLimitState.token_masked == token_status.token_masked).first()
-            if not state:
-                state = RateLimitState(
-                    token_masked=token_status.token_masked,
-                    limit=token_status.limit,
-                    remaining=token_status.remaining,
-                    reset_timestamp=token_status.reset_timestamp
-                )
-                db.add(state)
-            else:
-                state.limit = token_status.limit
-                state.remaining = token_status.remaining
-                state.reset_timestamp = token_status.reset_timestamp
-                state.last_used = datetime.now(timezone.utc)
-            db.commit()
-            db.close()
+            self.store.set_state(
+                token_masked=token_status.token_masked,
+                limit=token_status.limit,
+                remaining=token_status.remaining,
+                reset_timestamp=token_status.reset_timestamp
+            )
         except Exception:
             pass
 
@@ -131,9 +229,8 @@ class TokenManager:
                 pass
 
     def acquire_token(self) -> TokenStatus:
-        """Selects the token with the highest remaining budget, refreshing state from DB."""
+        """Selects the token with the highest remaining budget, refreshing state from shared store."""
         with self._lock:
-            # Sync latest status across processes
             self.load_from_db()
             now = time.time()
             for t in self.tokens:
@@ -154,7 +251,7 @@ class TokenManager:
             return chosen
 
     def update_limits(self, token_str: Optional[str], headers: Dict[str, str]) -> None:
-        """Parses X-RateLimit headers returned by GitHub API and persists to DB."""
+        """Parses X-RateLimit headers returned by GitHub API and persists to shared store."""
         with self._lock:
             target = next((t for t in self.tokens if t.token == token_str), None)
             if not target:

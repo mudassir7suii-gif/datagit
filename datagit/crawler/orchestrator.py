@@ -38,7 +38,24 @@ class CrawlOrchestrator:
             depth = job.depth or "metadata"
             effective_pages = max_pages or 5
 
-            raw_repos = self.client.fetch_repositories(target, max_pages=effective_pages)
+            try:
+                raw_repos = self.client.fetch_repositories(target, max_pages=effective_pages)
+            except ValueError as fetch_err:
+                # Epic P1.1: If single repo target is not found on GitHub, mark existing record as deleted
+                if "/" in target:
+                    existing_repo = db.query(Repository).filter(Repository.full_name == target).first()
+                    if existing_repo:
+                        existing_repo.is_deleted = True
+                        existing_repo.crawled_at = datetime.now(timezone.utc)
+                        job.status = "completed"
+                        job.items_crawled = 1
+                        job.total_found = 1
+                        job.error_message = f"Repository '{target}' not found on GitHub; marked as deleted per Epic P1.1."
+                        job.completed_at = datetime.now(timezone.utc)
+                        db.commit()
+                        return job
+                raise fetch_err
+
             job.total_found = len(raw_repos)
             saved_count = 0
             BATCH_SIZE = 50
@@ -169,6 +186,25 @@ class CrawlOrchestrator:
                 job.status = "completed"
             job.completed_at = datetime.now(timezone.utc)
             db.commit()
+
+            # Epic P3.2: Dispatch webhook event for job completion
+            try:
+                from datagit.services.webhook_dispatcher import webhook_dispatcher
+                webhook_dispatcher.dispatch_event(
+                    event_name="job.completed",
+                    data={
+                        "job_id": job.id,
+                        "target": job.target,
+                        "status": job.status,
+                        "items_crawled": job.items_crawled,
+                        "total_found": job.total_found
+                    },
+                    workspace_id=job.workspace_id,
+                    async_dispatch=True
+                )
+            except Exception:
+                pass
+
             return job
 
         except Exception as e:
@@ -179,6 +215,23 @@ class CrawlOrchestrator:
                 job.error_message = str(e)
                 job.completed_at = datetime.now(timezone.utc)
                 db.commit()
+
+                # Epic P3.2: Dispatch webhook event for job failure
+                try:
+                    from datagit.services.webhook_dispatcher import webhook_dispatcher
+                    webhook_dispatcher.dispatch_event(
+                        event_name="job.failed",
+                        data={
+                            "job_id": job.id,
+                            "target": job.target,
+                            "status": "failed",
+                            "error": str(e)
+                        },
+                        workspace_id=job.workspace_id,
+                        async_dispatch=True
+                    )
+                except Exception:
+                    pass
             except Exception as rollback_err:
                 logger.error(f"Failed to record failure status for job #{job_id}: {rollback_err}")
             raise

@@ -2,6 +2,7 @@ from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_, desc, asc, text
 from datagit.storage.models import Repository, Commit, Issue
+from datagit.analytics.scoring import calculate_repository_health
 
 class SearchEngine:
     """Provides structured filtering and FTS5 full-text search across crawled repositories."""
@@ -79,6 +80,15 @@ class SearchEngine:
 
         results = []
         for r in items:
+            health = calculate_repository_health(
+                repo_pushed_at=r.repo_pushed_at,
+                stars=r.stars or 0,
+                forks=r.forks or 0,
+                open_issues=r.open_issues or 0,
+                is_archived=bool(r.is_archived),
+                is_deleted=bool(r.is_deleted),
+                has_description=bool(r.description)
+            )
             results.append({
                 "id": r.id,
                 "github_id": r.github_id,
@@ -92,7 +102,9 @@ class SearchEngine:
                 "forks": r.forks,
                 "open_issues": r.open_issues,
                 "is_archived": r.is_archived,
-                "crawled_at": r.crawled_at.isoformat() if r.crawled_at else None
+                "repo_pushed_at": r.repo_pushed_at.isoformat() if r.repo_pushed_at else None,
+                "crawled_at": r.crawled_at.isoformat() if r.crawled_at else None,
+                "health": health
             })
 
         return {
@@ -111,6 +123,16 @@ class SearchEngine:
 
         commits = db.query(Commit).filter(Commit.repo_id == repo.id).order_by(Commit.committed_at.desc()).limit(20).all()
         issues = db.query(Issue).filter(Issue.repo_id == repo.id).order_by(Issue.created_at.desc()).limit(20).all()
+
+        health = calculate_repository_health(
+            repo_pushed_at=repo.repo_pushed_at,
+            stars=repo.stars or 0,
+            forks=repo.forks or 0,
+            open_issues=repo.open_issues or 0,
+            is_archived=bool(repo.is_archived),
+            is_deleted=bool(repo.is_deleted),
+            has_description=bool(repo.description)
+        )
 
         return {
             "id": repo.id,
@@ -132,6 +154,7 @@ class SearchEngine:
             "repo_updated_at": repo.repo_updated_at.isoformat() if repo.repo_updated_at else None,
             "repo_pushed_at": repo.repo_pushed_at.isoformat() if repo.repo_pushed_at else None,
             "crawled_at": repo.crawled_at.isoformat() if repo.crawled_at else None,
+            "health": health,
             "commits": [{
                 "id": c.id,
                 "sha": c.sha,

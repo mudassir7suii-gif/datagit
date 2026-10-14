@@ -82,6 +82,104 @@ class DataExporter:
         yield "\n]"
 
     @classmethod
+    def repo_to_rag_chunk(cls, r) -> Dict[str, Any]:
+        """Formats repository into a LangChain/LlamaIndex chunk object for vector stores."""
+        full_name = getattr(r, "full_name", None) or f"{getattr(r, 'owner', '')}/{getattr(r, 'name', '')}"
+        desc = getattr(r, "description", None) or "No description provided."
+        lang = getattr(r, "language", None) or "Unknown"
+        stars = getattr(r, "stars", 0) or 0
+        forks = getattr(r, "forks", 0) or 0
+        issues = getattr(r, "open_issues", 0) or 0
+        url = getattr(r, "url", "") or ""
+        repo_id = getattr(r, "id", None) or getattr(r, "github_id", None) or full_name.replace("/", "_")
+        crawled_at = r.crawled_at.isoformat() if getattr(r, "crawled_at", None) else None
+
+        text = (
+            f"Repository: {full_name}\n"
+            f"Language: {lang}\n"
+            f"Stars: {stars} | Forks: {forks} | Open Issues: {issues}\n"
+            f"Description: {desc}\n"
+            f"URL: {url}"
+        )
+        return {
+            "id": f"repo_{repo_id}",
+            "text": text,
+            "metadata": {
+                "source": "datagit",
+                "repo_id": repo_id,
+                "owner": getattr(r, "owner", ""),
+                "name": getattr(r, "name", ""),
+                "full_name": full_name,
+                "language": lang,
+                "stars": stars,
+                "forks": forks,
+                "open_issues": issues,
+                "url": url,
+                "crawled_at": crawled_at
+            }
+        }
+
+    @classmethod
+    def stream_rag_json(cls, query, chunk_size: int = 500) -> Generator[str, None, None]:
+        """Streams LangChain/LlamaIndex RAG vector chunks as JSON array."""
+        yield "[\n"
+        offset = 0
+        first_item = True
+        while True:
+            chunk = query.offset(offset).limit(chunk_size).all()
+            if not chunk:
+                break
+            for repo in chunk:
+                item_json = json.dumps(cls.repo_to_rag_chunk(repo), default=str)
+                if not first_item:
+                    yield ",\n" + item_json
+                else:
+                    yield item_json
+                    first_item = False
+            offset += chunk_size
+        yield "\n]"
+
+    @classmethod
+    def to_rag_json(cls, data: List[Any], filename: str) -> Path:
+        filepath = cls._get_safe_path(filename, "json")
+        rag_chunks = []
+        for item in data:
+            if hasattr(item, "full_name") or hasattr(item, "name"):
+                rag_chunks.append(cls.repo_to_rag_chunk(item))
+            elif isinstance(item, dict):
+                full_name = item.get("Full_Name") or item.get("full_name") or f"{item.get('owner', '')}/{item.get('name', '')}"
+                desc = item.get("Description") or item.get("description") or "No description provided."
+                lang = item.get("Language") or item.get("language") or "Unknown"
+                stars = item.get("Stars") if item.get("Stars") is not None else item.get("stars", 0)
+                forks = item.get("Forks") if item.get("Forks") is not None else item.get("forks", 0)
+                issues = item.get("Open_Issues") if item.get("Open_Issues") is not None else item.get("open_issues", 0)
+                url = item.get("URL") or item.get("url") or ""
+                repo_id = item.get("id") or item.get("github_id") or full_name.replace("/", "_")
+                text = (
+                    f"Repository: {full_name}\n"
+                    f"Language: {lang}\n"
+                    f"Stars: {stars} | Forks: {forks} | Open Issues: {issues}\n"
+                    f"Description: {desc}\n"
+                    f"URL: {url}"
+                )
+                rag_chunks.append({
+                    "id": f"repo_{repo_id}",
+                    "text": text,
+                    "metadata": {
+                        "source": "datagit",
+                        "full_name": full_name,
+                        "language": lang,
+                        "stars": stars,
+                        "forks": forks,
+                        "open_issues": issues,
+                        "url": url
+                    }
+                })
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(rag_chunks, f, indent=2, default=str)
+        return filepath
+
+    @classmethod
     def to_csv(cls, data: List[Dict[str, Any]], filename: str) -> Path:
         filepath = cls._get_safe_path(filename, "csv")
         if not data:

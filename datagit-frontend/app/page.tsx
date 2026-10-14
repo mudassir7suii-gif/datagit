@@ -6,6 +6,18 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL !== undefined
   ? process.env.NEXT_PUBLIC_API_URL
   : '';
 
+interface HealthScore {
+  score: number;
+  label: string;
+  color: string;
+  breakdown: {
+    recency: number;
+    popularity: number;
+    issue_hygiene: number;
+    vitality: number;
+  };
+}
+
 interface Repository {
   id: number;
   name: string;
@@ -18,7 +30,9 @@ interface Repository {
   open_issues: number;
   url: string;
   is_archived?: boolean;
+  repo_pushed_at?: string | null;
   crawled_at?: string | null;
+  health?: HealthScore;
 }
 
 interface Commit {
@@ -90,12 +104,135 @@ interface RateLimitStatus {
   pools: RateLimitPool[];
 }
 
+interface ApiResponse {
+  detail?: string;
+  access_token?: string;
+  message?: string;
+  email?: string;
+  job_id?: number;
+}
+
+interface ApiKeyItem {
+  id: number;
+  name: string;
+  key_prefix: string;
+  created_at: string;
+  last_used_at: string | null;
+  is_revoked: boolean;
+}
+
+interface WorkspaceItem {
+  id: number;
+  name: string;
+  slug: string;
+  role: string;
+  is_owner: boolean;
+  created_at: string | null;
+}
+
+interface WebhookItem {
+  id: number;
+  url: string;
+  events: string[];
+  is_active: boolean;
+  last_triggered_at: string | null;
+  failure_count: number;
+  created_at: string | null;
+}
+
+interface ExportArtifactItem {
+  id: number;
+  filename: string;
+  format: string;
+  file_size: number;
+  checksum_sha256: string | null;
+  download_url: string;
+  expires_at: string | null;
+  created_at: string | null;
+}
+
+interface TokenValidationResult {
+  valid: boolean;
+  username: string;
+  scopes: string[];
+  rate_limit: number;
+  rate_limit_remaining: number;
+  masked: string;
+}
+
+interface AuditLogItem {
+  id: number;
+  action: string;
+  target: string | null;
+  details: string | null;
+  ip_address: string | null;
+  created_at: string;
+}
+
+interface UserProfile {
+  id: number;
+  email: string;
+  created_at: string;
+  plan: string;
+  monthly_crawls_used: number;
+  monthly_crawls_limit: number;
+  max_pages_allowed: number;
+}
+
 export default function DataGitApp() {
   const [view, setView] = useState<'signin' | 'signup' | 'dashboard'>('signin');
-  const [dashboardTab, setDashboardTab] = useState<'explore' | 'jobs'>('explore');
-  const [email, setEmail] = useState<string>('');
+  const [dashboardTab, setDashboardTab] = useState<'explore' | 'jobs' | 'exports' | 'webhooks' | 'credentials' | 'api-keys' | 'audit'>('explore');
+  const [showPricing, setShowPricing] = useState<boolean>(false);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+
+  // Workspaces State
+  const [workspaces, setWorkspaces] = useState<WorkspaceItem[]>([]);
+  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceItem | null>(null);
+  const [showWorkspaceModal, setShowWorkspaceModal] = useState<boolean>(false);
+  const [newWorkspaceName, setNewWorkspaceName] = useState<string>('');
+
+  // API Keys & Interactive SDK
+  const [apiKeys, setApiKeys] = useState<ApiKeyItem[]>([]);
+  const [newKeyName, setNewKeyName] = useState<string>('');
+  const [createdKey, setCreatedKey] = useState<string>('');
+  const [copiedKey, setCopiedKey] = useState<boolean>(false);
+  const [sdkLang, setSdkLang] = useState<'python' | 'curl' | 'cli'>('python');
+
+  // Exports & Object Storage State
+  const [exportArtifacts, setExportArtifacts] = useState<ExportArtifactItem[]>([]);
+  const [exportFormat, setExportFormat] = useState<'csv' | 'json' | 'parquet' | 'rag_json'>('csv');
+  const [exportGenerating, setExportGenerating] = useState<boolean>(false);
+  const [exportMessage, setExportMessage] = useState<string>('');
+
+  // Webhooks State
+  const [webhooks, setWebhooks] = useState<WebhookItem[]>([]);
+  const [newWebhookUrl, setNewWebhookUrl] = useState<string>('');
+  const [newWebhookEvents, setNewWebhookEvents] = useState<string>('job.completed,job.failed');
+  const [createdWebhookSecret, setCreatedWebhookSecret] = useState<string>('');
+  const [webhookTestMessage, setWebhookTestMessage] = useState<string>('');
+  const [testingWebhookId, setTestingWebhookId] = useState<number | null>(null);
+
+  // GitHub Credentials Pool State
+  const [tokenInput, setTokenInput] = useState<string>('');
+  const [validatingToken, setValidatingToken] = useState<boolean>(false);
+  const [tokenValidation, setTokenValidation] = useState<TokenValidationResult | null>(null);
+  const [tokenAddMessage, setTokenAddMessage] = useState<string>('');
+  const [tokenAddError, setTokenAddError] = useState<string>('');
+
+  const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
+  const [email, setEmail] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('datagit_email') || '';
+    }
+    return '';
+  });
   const [password, setPassword] = useState<string>('');
-  const [token, setToken] = useState<string>('');
+  const [token, setToken] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('datagit_token') || '';
+    }
+    return '';
+  });
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [successMsg, setSuccessMsg] = useState<string>('');
 
@@ -152,61 +289,7 @@ export default function DataGitApp() {
     return res;
   }, [token]);
 
-  // Restore token from localStorage and verify session on startup
-  useEffect(() => {
-    const savedToken = localStorage.getItem('datagit_token');
-    const savedEmail = localStorage.getItem('datagit_email');
-    if (savedToken && savedEmail) {
-      setToken(savedToken);
-      setEmail(savedEmail);
-      // Verify validity
-      fetch(`${API_URL}/api/auth/me`, {
-        headers: { Authorization: `Bearer ${savedToken}` },
-        credentials: 'include',
-      })
-        .then((res) => {
-          if (res.ok) {
-            setView('dashboard');
-          } else {
-            localStorage.removeItem('datagit_token');
-            setToken('');
-            setView('signin');
-          }
-        })
-        .catch(() => {
-          setView('dashboard');
-        });
-    }
-  }, []);
-
-  // Fetch Insights & Rate Limits on Dashboard load
-  useEffect(() => {
-    if (view === 'dashboard') {
-      fetchInsights();
-      fetchRateLimits();
-    }
-  }, [view]);
-
-  // Poll Jobs list when on 'jobs' tab
-  useEffect(() => {
-    if (view === 'dashboard' && dashboardTab === 'jobs') {
-      fetchJobs();
-      const interval = setInterval(fetchJobs, 3000);
-      return () => clearInterval(interval);
-    }
-  }, [view, dashboardTab]);
-
-  // Debounce search and filter updates
-  useEffect(() => {
-    if (view === 'dashboard') {
-      const timer = setTimeout(() => {
-        fetchRepositories();
-      }, 250);
-      return () => clearTimeout(timer);
-    }
-  }, [view, searchTerm, selectedLanguage, minStars, page]);
-
-  const fetchInsights = async () => {
+  const fetchInsights = useCallback(async () => {
     try {
       const res = await fetch(`${API_URL}/api/insights`);
       if (res.ok) {
@@ -216,9 +299,9 @@ export default function DataGitApp() {
     } catch {
       // API offline
     }
-  };
+  }, []);
 
-  const fetchRateLimits = async () => {
+  const fetchRateLimits = useCallback(async () => {
     try {
       const res = await authFetch(`${API_URL}/api/ratelimit`);
       if (res.ok) {
@@ -228,9 +311,9 @@ export default function DataGitApp() {
     } catch {
       // Ignore
     }
-  };
+  }, [authFetch]);
 
-  const fetchJobs = async () => {
+  const fetchJobs = useCallback(async () => {
     try {
       const res = await authFetch(`${API_URL}/api/jobs?limit=20`);
       if (res.ok) {
@@ -240,9 +323,85 @@ export default function DataGitApp() {
     } catch {
       // Ignore
     }
-  };
+  }, [authFetch]);
 
-  const fetchRepositories = async () => {
+  const fetchProfile = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API_URL}/api/auth/me`);
+      if (res.ok) {
+        const data = await res.json();
+        setProfile(data);
+      }
+    } catch {
+      // Ignore
+    }
+  }, [authFetch]);
+
+  const fetchApiKeys = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API_URL}/api/auth/api-keys`);
+      if (res.ok) {
+        const data = await res.json();
+        setApiKeys(data.items || []);
+      }
+    } catch {
+      // Ignore
+    }
+  }, [authFetch]);
+
+  const fetchAuditLogs = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API_URL}/api/audit?limit=50`);
+      if (res.ok) {
+        const data = await res.json();
+        setAuditLogs(data.items || []);
+      }
+    } catch {
+      // Ignore
+    }
+  }, [authFetch]);
+
+  const fetchWorkspaces = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API_URL}/api/workspaces`);
+      if (res.ok) {
+        const data = await res.json();
+        const items = data.items || [];
+        setWorkspaces(items);
+        if (items.length > 0) {
+          setActiveWorkspace((prev) => prev || items[0]);
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }, [authFetch]);
+
+  const fetchExportArtifacts = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API_URL}/api/export/artifacts`);
+      if (res.ok) {
+        const data = await res.json();
+        setExportArtifacts(data.items || []);
+      }
+    } catch {
+      // Ignore
+    }
+  }, [authFetch]);
+
+  const fetchWebhooks = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API_URL}/api/webhooks`);
+      if (res.ok) {
+        const data = await res.json();
+        setWebhooks(data.items || []);
+      }
+    } catch {
+      // Ignore
+    }
+  }, [authFetch]);
+
+  const fetchRepositories = useCallback(async () => {
     setLoading(true);
     try {
       const offset = (page - 1) * pageSize;
@@ -265,7 +424,115 @@ export default function DataGitApp() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [page, minStars, searchTerm, selectedLanguage]);
+
+  // Restore token from localStorage and verify session on startup
+  useEffect(() => {
+    if (!token) return;
+    fetch(`${API_URL}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+      credentials: 'include',
+    })
+      .then((res) => {
+        if (res.ok) {
+          setView('dashboard');
+        } else {
+          localStorage.removeItem('datagit_token');
+          setToken('');
+          setView('signin');
+        }
+      })
+      .catch(() => {
+        setView('dashboard');
+      });
+  }, [token]);
+
+  // Fetch Profile, Insights & Rate Limits on Dashboard load
+  useEffect(() => {
+    if (view === 'dashboard') {
+      const timer = setTimeout(() => {
+        fetchProfile();
+        fetchInsights();
+        fetchRateLimits();
+        fetchWorkspaces();
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [view, fetchProfile, fetchInsights, fetchRateLimits, fetchWorkspaces]);
+
+  // Poll Jobs list when on 'jobs' tab
+  useEffect(() => {
+    if (view === 'dashboard' && dashboardTab === 'jobs') {
+      const timer = setTimeout(() => {
+        fetchJobs();
+      }, 0);
+      const interval = setInterval(fetchJobs, 3000);
+      return () => {
+        clearTimeout(timer);
+        clearInterval(interval);
+      };
+    }
+  }, [view, dashboardTab, fetchJobs]);
+
+  // Load API keys when on 'api-keys' tab
+  useEffect(() => {
+    if (view === 'dashboard' && dashboardTab === 'api-keys') {
+      const timer = setTimeout(() => {
+        fetchApiKeys();
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [view, dashboardTab, fetchApiKeys]);
+
+  // Load Export Artifacts when on 'exports' tab
+  useEffect(() => {
+    if (view === 'dashboard' && dashboardTab === 'exports') {
+      const timer = setTimeout(() => {
+        fetchExportArtifacts();
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [view, dashboardTab, fetchExportArtifacts]);
+
+  // Load Webhooks when on 'webhooks' tab
+  useEffect(() => {
+    if (view === 'dashboard' && dashboardTab === 'webhooks') {
+      const timer = setTimeout(() => {
+        fetchWebhooks();
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [view, dashboardTab, fetchWebhooks]);
+
+  // Refresh Rate Limits when on 'credentials' tab
+  useEffect(() => {
+    if (view === 'dashboard' && dashboardTab === 'credentials') {
+      const timer = setTimeout(() => {
+        fetchRateLimits();
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [view, dashboardTab, fetchRateLimits]);
+
+  // Load Audit Trail when on 'audit' tab
+  useEffect(() => {
+    if (view === 'dashboard' && dashboardTab === 'audit') {
+      const timer = setTimeout(() => {
+        fetchAuditLogs();
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [view, dashboardTab, fetchAuditLogs]);
+
+  // Debounce search and filter updates
+  useEffect(() => {
+    if (view === 'dashboard') {
+      const timer = setTimeout(() => {
+        fetchRepositories();
+      }, 250);
+      return () => clearTimeout(timer);
+    }
+  }, [view, fetchRepositories]);
 
   const openRepoDetails = async (repoId: number) => {
     setDetailLoading(true);
@@ -313,9 +580,9 @@ export default function DataGitApp() {
         credentials: 'include',
         body: JSON.stringify({ email, password }),
       });
-      let data: any = null;
+      let data: ApiResponse | null = null;
       try {
-        data = await res.json();
+        data = (await res.json()) as ApiResponse;
       } catch {
         const text = await res.text().catch(() => '');
         data = { detail: text || `Server error (${res.status})` };
@@ -340,16 +607,16 @@ export default function DataGitApp() {
         credentials: 'include',
         body: JSON.stringify({ email, password }),
       });
-      let data: any = null;
+      let data: ApiResponse | null = null;
       try {
-        data = await res.json();
+        data = (await res.json()) as ApiResponse;
       } catch {
         const text = await res.text().catch(() => '');
         data = { detail: text || `Server error (${res.status})` };
       }
       if (!res.ok) throw new Error(data?.detail || 'Sign in failed');
 
-      const authToken = data.access_token;
+      const authToken = data?.access_token || '';
       setToken(authToken);
       localStorage.setItem('datagit_token', authToken);
       localStorage.setItem('datagit_email', email);
@@ -415,6 +682,220 @@ export default function DataGitApp() {
     }
   };
 
+  const handleRerunJob = async (jobId: number) => {
+    try {
+      const res = await authFetch(`${API_URL}/api/jobs/${jobId}/rerun`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setJobMessage(`Job #${jobId} re-enqueued as Job #${data.job_id}.`);
+        fetchJobs();
+      }
+    } catch (err: unknown) {
+      setJobError(err instanceof Error ? err.message : 'Failed to re-run job');
+    }
+  };
+
+  const handleCreateApiKey = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!newKeyName.trim()) return;
+    try {
+      const res = await authFetch(`${API_URL}/api/auth/api-keys`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newKeyName.trim() }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCreatedKey(data.api_key || '');
+        setNewKeyName('');
+        fetchApiKeys();
+      }
+    } catch (err) {
+      console.error('Failed to create API key', err);
+    }
+  };
+
+  const handleRevokeApiKey = async (keyId: number) => {
+    if (!window.confirm('Are you sure you want to revoke this API key? This action is immediate and cannot be undone.')) {
+      return;
+    }
+    try {
+      const res = await authFetch(`${API_URL}/api/auth/api-keys/${keyId}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        fetchApiKeys();
+      }
+    } catch (err) {
+      console.error('Failed to revoke API key', err);
+    }
+  };
+
+  const handleCopyKey = () => {
+    if (!createdKey) return;
+    navigator.clipboard.writeText(createdKey);
+    setCopiedKey(true);
+    setTimeout(() => setCopiedKey(false), 2000);
+  };
+
+  const handleCreateWorkspace = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!newWorkspaceName.trim()) return;
+    try {
+      const res = await authFetch(`${API_URL}/api/workspaces`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newWorkspaceName.trim() }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setNewWorkspaceName('');
+        setShowWorkspaceModal(false);
+        await fetchWorkspaces();
+        setActiveWorkspace(data);
+      }
+    } catch (err) {
+      console.error('Failed to create workspace', err);
+    }
+  };
+
+  const handleGenerateExportArtifact = async () => {
+    setExportGenerating(true);
+    setExportMessage('');
+    try {
+      const res = await authFetch(`${API_URL}/api/export/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          format: exportFormat,
+          search: searchTerm.trim() || undefined,
+          language: selectedLanguage.trim() || undefined,
+          min_stars: minStars > 0 ? minStars : undefined,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setExportMessage(`Export artifact '${data.filename}' created! Stored in object storage with 48h retention.`);
+        fetchExportArtifacts();
+      } else {
+        const err = await res.json();
+        setExportMessage(err.detail || 'Export generation failed.');
+      }
+    } catch (err: unknown) {
+      setExportMessage(err instanceof Error ? err.message : 'Export generation error');
+    } finally {
+      setExportGenerating(false);
+    }
+  };
+
+  const handleCreateWebhook = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!newWebhookUrl.trim()) return;
+    try {
+      const res = await authFetch(`${API_URL}/api/webhooks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: newWebhookUrl.trim(),
+          events: newWebhookEvents.trim() || 'job.completed,job.failed',
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCreatedWebhookSecret(data.secret || '');
+        setNewWebhookUrl('');
+        fetchWebhooks();
+      }
+    } catch (err) {
+      console.error('Failed to create webhook', err);
+    }
+  };
+
+  const handleDeleteWebhook = async (webhookId: number) => {
+    if (!window.confirm('Delete this webhook endpoint?')) return;
+    try {
+      const res = await authFetch(`${API_URL}/api/webhooks/${webhookId}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        fetchWebhooks();
+      }
+    } catch (err) {
+      console.error('Failed to delete webhook', err);
+    }
+  };
+
+  const handleTestWebhook = async (webhookId: number) => {
+    setTestingWebhookId(webhookId);
+    setWebhookTestMessage('');
+    try {
+      const res = await authFetch(`${API_URL}/api/webhooks/${webhookId}/test`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.success) {
+        setWebhookTestMessage(`Delivery verified! Receiver returned HTTP 2xx. HMAC Signature: ${data.signature.slice(0, 20)}...`);
+      } else {
+        setWebhookTestMessage(`Delivery attempted, but target receiver did not respond with 2xx.`);
+      }
+    } catch (err: unknown) {
+      setWebhookTestMessage(err instanceof Error ? err.message : 'Webhook ping failed.');
+    } finally {
+      setTestingWebhookId(null);
+    }
+  };
+
+  const handleValidateToken = async () => {
+    if (!tokenInput.trim()) return;
+    setValidatingToken(true);
+    setTokenValidation(null);
+    setTokenAddMessage('');
+    setTokenAddError('');
+    try {
+      const res = await authFetch(`${API_URL}/api/tokens/validate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: tokenInput.trim() }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setTokenValidation(data);
+      } else {
+        setTokenAddError(data.detail || 'Token validation failed.');
+      }
+    } catch (err: unknown) {
+      setTokenAddError(err instanceof Error ? err.message : 'Validation error.');
+    } finally {
+      setValidatingToken(false);
+    }
+  };
+
+  const handleAddToken = async () => {
+    if (!tokenInput.trim()) return;
+    setTokenAddMessage('');
+    setTokenAddError('');
+    try {
+      const res = await authFetch(`${API_URL}/api/tokens/add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: tokenInput.trim() }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setTokenAddMessage(data.message || 'Token registered successfully.');
+        setTokenInput('');
+        setTokenValidation(null);
+        fetchRateLimits();
+      } else {
+        setTokenAddError(data.detail || 'Failed to add token to pool.');
+      }
+    } catch (err: unknown) {
+      setTokenAddError(err instanceof Error ? err.message : 'Error adding token.');
+    }
+  };
+
   // Export with all active filters forwarded per Constitution
   const handleExport = (format: 'csv' | 'json' | 'parquet') => {
     const params = new URLSearchParams({ format });
@@ -443,98 +924,324 @@ export default function DataGitApp() {
           </span>
         </div>
 
-        {view === 'dashboard' && (
-          <div className="flex items-center space-x-4">
-            <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs font-medium">
-              <button
-                onClick={() => setDashboardTab('explore')}
-                className={`px-3 py-1 rounded-md transition ${dashboardTab === 'explore' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+        <div className="flex items-center space-x-3">
+          {view === 'dashboard' && workspaces.length > 0 && (
+            <div className="hidden md:flex items-center gap-1.5 bg-slate-950 border border-slate-800 px-2.5 py-1 rounded-lg text-xs">
+              <span className="text-slate-400">🏢</span>
+              <select
+                aria-label="Active Workspace"
+                value={activeWorkspace?.id || ''}
+                onChange={(e) => {
+                  const ws = workspaces.find((w) => w.id === Number(e.target.value));
+                  if (ws) setActiveWorkspace(ws);
+                }}
+                className="bg-transparent text-white font-medium focus:outline-none cursor-pointer text-xs"
               >
-                Explorer
+                {workspaces.map((w) => (
+                  <option key={w.id} value={w.id} className="bg-slate-900 text-white">
+                    {w.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => setShowWorkspaceModal(true)}
+                title="Create Workspace"
+                className="text-indigo-400 hover:text-indigo-300 font-bold ml-1 text-xs"
+              >
+                +
               </button>
+            </div>
+          )}
+
+          <button
+            onClick={() => setShowPricing(true)}
+            className="text-xs text-slate-300 hover:text-white px-3 py-1.5 rounded-lg border border-slate-800 hover:border-slate-700 bg-slate-900/80 transition flex items-center gap-1.5"
+          >
+            <span>💎</span>
+            <span>Plans & Quotas</span>
+          </button>
+
+          {view === 'dashboard' ? (
+            <div className="flex items-center space-x-3">
+              <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs font-medium overflow-x-auto">
+                <button
+                  onClick={() => setDashboardTab('explore')}
+                  className={`px-2.5 py-1 rounded-md transition ${dashboardTab === 'explore' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                >
+                  Explorer
+                </button>
+                <button
+                  onClick={() => setDashboardTab('jobs')}
+                  className={`px-2.5 py-1 rounded-md transition ${dashboardTab === 'jobs' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                >
+                  Jobs {jobs.filter((j) => j.status === 'running').length > 0 && '⚡'}
+                </button>
+                <button
+                  onClick={() => setDashboardTab('exports')}
+                  className={`px-2.5 py-1 rounded-md transition ${dashboardTab === 'exports' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                >
+                  Exports
+                </button>
+                <button
+                  onClick={() => setDashboardTab('webhooks')}
+                  className={`px-2.5 py-1 rounded-md transition ${dashboardTab === 'webhooks' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                >
+                  Webhooks
+                </button>
+                <button
+                  onClick={() => setDashboardTab('credentials')}
+                  className={`px-2.5 py-1 rounded-md transition ${dashboardTab === 'credentials' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                >
+                  GitHub Tokens
+                </button>
+                <button
+                  onClick={() => setDashboardTab('api-keys')}
+                  className={`px-2.5 py-1 rounded-md transition ${dashboardTab === 'api-keys' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                >
+                  API Keys & SDK
+                </button>
+                <button
+                  onClick={() => setDashboardTab('audit')}
+                  className={`px-2.5 py-1 rounded-md transition ${dashboardTab === 'audit' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                >
+                  Audit
+                </button>
+              </div>
+
+              {profile && (
+                <div className="hidden 2xl:flex items-center gap-2 bg-slate-950 border border-slate-800 px-3 py-1 rounded-lg text-xs">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                  <span className="text-slate-400 uppercase tracking-wider font-semibold text-[10px]">{profile.plan} Tier</span>
+                  <span className="text-slate-600">•</span>
+                  <span className="text-slate-300 font-mono">{profile.monthly_crawls_used} / {profile.monthly_crawls_limit} crawls</span>
+                </div>
+              )}
+
+              <span className="text-xs text-slate-400 hidden md:inline">
+                <span className="text-indigo-400 font-semibold">{email || 'Guest Explorer'}</span>
+              </span>
               <button
-                onClick={() => setDashboardTab('jobs')}
-                className={`px-3 py-1 rounded-md transition ${dashboardTab === 'jobs' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                onClick={handleSignOut}
+                className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-3 py-1.5 rounded-lg border border-slate-700 transition"
               >
-                Job Monitor {jobs.filter((j) => j.status === 'running').length > 0 && '⚡'}
+                Sign Out
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => {
+                setView('dashboard');
+                fetchRepositories();
+              }}
+              className="text-xs text-indigo-400 hover:text-indigo-300 font-medium px-3 py-1.5"
+            >
+              Live Demo →
+            </button>
+          )}
+        </div>
+      </header>
+
+      {/* Auth / Public Marketing Hero Screen (Spec 3.1 & 4.4) */}
+      {view !== 'dashboard' && (
+        <div className="flex-1 flex flex-col justify-center items-center p-6 max-w-6xl w-full mx-auto my-auto">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 items-center w-full">
+            {/* Left Hero Column: 30-Second Understanding & Value Props */}
+            <div className="lg:col-span-7 space-y-6">
+              <div className="inline-flex items-center gap-2 px-3 py-1 bg-indigo-950/60 border border-indigo-800/50 rounded-full text-indigo-400 text-xs font-mono">
+                <span>⚡ Rate-Limit Resilient</span>
+                <span>•</span>
+                <span>AI-Ready Dataset Platform</span>
+              </div>
+              <h1 className="text-3xl sm:text-5xl font-black tracking-tight text-white leading-tight">
+                Turn any GitHub org or repo into <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-purple-400">clean, AI-ready datasets.</span>
+              </h1>
+              <p className="text-slate-300 text-sm sm:text-base leading-relaxed">
+                Automated repository intelligence without writing or babysitting crawlers. Paced GitHub API ingestion with shared rate budgets, full-text search, and multi-format streaming exports.
+              </p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+                <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-xl">
+                  <div className="text-indigo-400 text-lg mb-1">🛡️</div>
+                  <h4 className="text-xs font-semibold text-white">Zero Quota Burn</h4>
+                  <p className="text-[11px] text-slate-400 mt-1">Multi-token rotation, pacing, jitter & 403/429 backoff.</p>
+                </div>
+                <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-xl">
+                  <div className="text-purple-400 text-lg mb-1">🔍</div>
+                  <h4 className="text-xs font-semibold text-white">Full-Text Indexed</h4>
+                  <p className="text-[11px] text-slate-400 mt-1">FTS5 accelerated search & content-hash deduplication.</p>
+                </div>
+                <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-xl">
+                  <div className="text-emerald-400 text-lg mb-1">📦</div>
+                  <h4 className="text-xs font-semibold text-white">Streaming Exports</h4>
+                  <p className="text-[11px] text-slate-400 mt-1">Memory-safe streaming CSV, JSON, and Apache Parquet.</p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-4 pt-2">
+                <button
+                  onClick={() => {
+                    setView('dashboard');
+                    fetchRepositories();
+                  }}
+                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-5 py-2.5 rounded-lg shadow-lg shadow-indigo-600/30 font-medium transition flex items-center gap-2"
+                >
+                  <span>Explore Repositories Demo</span>
+                  <span>→</span>
+                </button>
+                <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-slate-400 hidden sm:flex items-center gap-2">
+                  <span className="text-indigo-400">$</span>
+                  <span>python -m datagit.cli.main crawl vercel</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Right Column: Sign In / Sign Up Form */}
+            <div className="lg:col-span-5 w-full">
+              <div className="bg-slate-900 border border-slate-800 p-8 rounded-2xl shadow-2xl">
+                <h2 className="text-2xl font-bold mb-2 text-white">
+                  {view === 'signin' ? 'Welcome to DataGit' : 'Create an Account'}
+                </h2>
+                <p className="text-slate-400 text-sm mb-6">
+                  {view === 'signin'
+                    ? 'Sign in to dispatch background crawl jobs and export structured corpora.'
+                    : 'Register to manage crawl pipelines in compliance with the DataGit Constitution.'}
+                </p>
+
+                {errorMsg && <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 text-red-400 text-sm rounded-lg">{errorMsg}</div>}
+                {successMsg && <div className="mb-4 p-3 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-sm rounded-lg">{successMsg}</div>}
+
+                <form onSubmit={view === 'signin' ? handleSignIn : handleSignUp} className="space-y-4">
+                  <div>
+                    <label className="block text-xs uppercase tracking-wider text-slate-400 mb-1 font-semibold">Email Address</label>
+                    <input
+                      type="email"
+                      required
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition text-sm"
+                      placeholder="developer@example.com"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs uppercase tracking-wider text-slate-400 mb-1 font-semibold">Password (min 8 characters)</label>
+                    <input
+                      type="password"
+                      required
+                      minLength={8}
+                      maxLength={72}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition text-sm"
+                      placeholder="••••••••"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-3 rounded-lg shadow-lg shadow-indigo-600/30 transition text-sm"
+                  >
+                    {view === 'signin' ? 'Sign In' : 'Create Account'}
+                  </button>
+                </form>
+
+                <p className="text-center text-xs text-slate-400 mt-6">
+                  {view === 'signin' ? "Don't have an account? " : 'Already registered? '}
+                  <button
+                    onClick={() => {
+                      setView(view === 'signin' ? 'signup' : 'signin');
+                      setErrorMsg('');
+                      setSuccessMsg('');
+                    }}
+                    className="text-indigo-400 hover:underline font-medium"
+                  >
+                    {view === 'signin' ? 'Sign Up' : 'Sign In'}
+                  </button>
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Pricing & Quotas Modal (Spec 3.8 & 4.7) */}
+      {showPricing && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-4xl w-full p-6 sm:p-8 space-y-6 shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-start">
+              <div>
+                <h3 className="text-xl font-bold text-white">Transparent Plans & Quotas</h3>
+                <p className="text-xs text-slate-400 mt-1">Know exact limits, quotas, and capabilities before committing.</p>
+              </div>
+              <button
+                onClick={() => setShowPricing(false)}
+                className="text-slate-400 hover:text-white text-lg font-bold p-1"
+              >
+                ✕
               </button>
             </div>
 
-            <span className="text-xs text-slate-400 hidden md:inline">
-              <span className="text-indigo-400 font-semibold">{email}</span>
-            </span>
-            <button
-              onClick={handleSignOut}
-              className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-3 py-1.5 rounded-lg border border-slate-700 transition"
-            >
-              Sign Out
-            </button>
-          </div>
-        )}
-      </header>
-
-      {/* Auth Screen */}
-      {view !== 'dashboard' && (
-        <div className="flex-1 flex items-center justify-center p-6">
-          <div className="w-full max-w-md bg-slate-900 border border-slate-800 p-8 rounded-2xl shadow-2xl">
-            <h2 className="text-2xl font-bold mb-2 text-white">
-              {view === 'signin' ? 'Welcome to DataGit' : 'Create an Account'}
-            </h2>
-            <p className="text-slate-400 text-sm mb-6">
-              {view === 'signin'
-                ? 'Sign in to access repository intelligence, launch jobs, and export datasets'
-                : 'Register to deploy and monitor crawler pipelines in compliance with the DataGit Constitution'}
-            </p>
-
-            {errorMsg && <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 text-red-400 text-sm rounded-lg">{errorMsg}</div>}
-            {successMsg && <div className="mb-4 p-3 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-sm rounded-lg">{successMsg}</div>}
-
-            <form onSubmit={view === 'signin' ? handleSignIn : handleSignUp} className="space-y-4">
-              <div>
-                <label className="block text-xs uppercase tracking-wider text-slate-400 mb-1 font-semibold">Email Address</label>
-                <input
-                  type="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition text-sm"
-                  placeholder="developer@example.com"
-                />
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-5 flex flex-col justify-between">
+                <div>
+                  <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Developer Free</span>
+                  <div className="text-2xl font-black text-white mt-2">$0 <span className="text-xs font-normal text-slate-500">/mo</span></div>
+                  <ul className="text-xs text-slate-300 space-y-2 mt-4">
+                    <li>✔ 50 Monthly Crawls</li>
+                    <li>✔ 3 Pages / 300 Repos per crawl</li>
+                    <li>✔ 60 req/min API rate limit</li>
+                    <li>✔ CSV, JSON, Parquet exports</li>
+                    <li>✔ FTS5 Full-Text Search</li>
+                  </ul>
+                </div>
+                <button
+                  onClick={() => setShowPricing(false)}
+                  className="w-full mt-6 bg-slate-800 hover:bg-slate-700 text-white text-xs py-2 rounded-lg font-medium transition"
+                >
+                  Current Tier
+                </button>
               </div>
-              <div>
-                <label className="block text-xs uppercase tracking-wider text-slate-400 mb-1 font-semibold">Password (min 8 characters)</label>
-                <input
-                  type="password"
-                  required
-                  minLength={8}
-                  maxLength={72}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition text-sm"
-                  placeholder="••••••••"
-                />
-              </div>
-              <button
-                type="submit"
-                className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-3 rounded-lg shadow-lg shadow-indigo-600/30 transition text-sm"
-              >
-                {view === 'signin' ? 'Sign In' : 'Create Account'}
-              </button>
-            </form>
 
-            <p className="text-center text-xs text-slate-400 mt-6">
-              {view === 'signin' ? "Don't have an account? " : 'Already registered? '}
-              <button
-                onClick={() => {
-                  setView(view === 'signin' ? 'signup' : 'signin');
-                  setErrorMsg('');
-                  setSuccessMsg('');
-                }}
-                className="text-indigo-400 hover:underline font-medium"
-              >
-                {view === 'signin' ? 'Sign Up' : 'Sign In'}
-              </button>
-            </p>
+              <div className="bg-slate-950 border-2 border-indigo-500/80 rounded-xl p-5 flex flex-col justify-between relative shadow-xl shadow-indigo-500/10">
+                <span className="absolute -top-3 right-4 bg-indigo-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">Most Popular</span>
+                <div>
+                  <span className="text-xs font-semibold text-indigo-400 uppercase tracking-wider">Team Pro</span>
+                  <div className="text-2xl font-black text-white mt-2">$49 <span className="text-xs font-normal text-slate-500">/mo</span></div>
+                  <ul className="text-xs text-slate-300 space-y-2 mt-4">
+                    <li>✔ 2,000 Monthly Crawls</li>
+                    <li>✔ 50 Pages / 5,000 Repos per crawl</li>
+                    <li>✔ 600 req/min API rate limit</li>
+                    <li>✔ Multi-Token Rotating Pool</li>
+                    <li>✔ Full Commits & Issues Depth</li>
+                    <li>✔ 365 Days Data Retention</li>
+                  </ul>
+                </div>
+                <button
+                  onClick={() => alert('Stripe self-serve upgrade integration is configured. Contact support to activate Pro tier.')}
+                  className="w-full mt-6 bg-indigo-600 hover:bg-indigo-500 text-white text-xs py-2 rounded-lg font-medium transition"
+                >
+                  Upgrade to Pro
+                </button>
+              </div>
+
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-5 flex flex-col justify-between">
+                <div>
+                  <span className="text-xs font-semibold text-purple-400 uppercase tracking-wider">Enterprise AI</span>
+                  <div className="text-2xl font-black text-white mt-2">Custom</div>
+                  <ul className="text-xs text-slate-300 space-y-2 mt-4">
+                    <li>✔ Unlimited Crawls & Pages</li>
+                    <li>✔ Dedicated Workers & Token Pool</li>
+                    <li>✔ VPC / Self-Hosted Deployment</li>
+                    <li>✔ Custom Embeddings Pipelines</li>
+                    <li>✔ 99.9% Uptime SLA</li>
+                  </ul>
+                </div>
+                <button
+                  onClick={() => window.open('mailto:enterprise@datagit.dev', '_blank')}
+                  className="w-full mt-6 bg-slate-800 hover:bg-slate-700 text-white text-xs py-2 rounded-lg font-medium transition"
+                >
+                  Contact Sales
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -642,9 +1349,21 @@ export default function DataGitApp() {
                           <h3 className="font-semibold text-sm text-indigo-400 group-hover:text-indigo-300 truncate">
                             {repo.full_name}
                           </h3>
-                          <span className="text-xs bg-slate-950 border border-slate-800 px-2 py-0.5 rounded-full text-amber-400 font-mono whitespace-nowrap">
-                            ⭐ {repo.stars.toLocaleString()}
-                          </span>
+                          <div className="flex items-center gap-1.5 flex-shrink-0">
+                            {repo.health && (
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-medium ${
+                                repo.health.label === 'Thriving' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30' :
+                                repo.health.label === 'Active' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/30' :
+                                repo.health.label === 'Moderate' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30' :
+                                'bg-red-500/10 text-red-400 border border-red-500/30'
+                              }`}>
+                                {repo.health.score}
+                              </span>
+                            )}
+                            <span className="text-xs bg-slate-950 border border-slate-800 px-2 py-0.5 rounded-full text-amber-400 font-mono whitespace-nowrap">
+                              ⭐ {repo.stars.toLocaleString()}
+                            </span>
+                          </div>
                         </div>
                         <p className="text-xs text-slate-400 line-clamp-2 mb-4">
                           {repo.description || 'No description provided.'}
@@ -803,8 +1522,706 @@ export default function DataGitApp() {
                                   Cancel
                                 </button>
                               ) : (
-                                <span className="text-slate-600">—</span>
+                                <button
+                                  onClick={() => handleRerunJob(j.id)}
+                                  className="text-indigo-400 hover:text-indigo-300 text-xs font-medium"
+                                >
+                                  Re-run
+                                </button>
                               )}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB: EXPORTS VIEW */}
+          {dashboardTab === 'exports' && (
+            <div className="space-y-6">
+              <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl space-y-4">
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <span>📦</span> Dataset Export Center
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Export mined repositories into clean AI-ready corpora. Generate signed object storage artifacts (48-hour retention) or stream directly.
+                  </p>
+                </div>
+
+                {/* Filter indicators */}
+                <div className="flex flex-wrap items-center gap-2 text-xs pt-1">
+                  <span className="text-slate-500">Active Export Filters:</span>
+                  <span className="bg-slate-950 border border-slate-800 px-2.5 py-0.5 rounded text-indigo-400 font-mono">
+                    Keyword: {searchTerm || 'All'}
+                  </span>
+                  <span className="bg-slate-950 border border-slate-800 px-2.5 py-0.5 rounded text-purple-400 font-mono">
+                    Language: {selectedLanguage || 'All'}
+                  </span>
+                  <span className="bg-slate-950 border border-slate-800 px-2.5 py-0.5 rounded text-amber-400 font-mono">
+                    Min Stars: {minStars}
+                  </span>
+                </div>
+
+                {/* Format and generation controls */}
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-3 border-t border-slate-800/80">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-slate-400 font-medium">Format:</span>
+                    {(['csv', 'json', 'parquet', 'rag_json'] as const).map((fmt) => (
+                      <button
+                        key={fmt}
+                        onClick={() => setExportFormat(fmt)}
+                        className={`text-xs px-3 py-1.5 rounded-lg border font-mono uppercase transition ${
+                          exportFormat === fmt
+                            ? 'bg-indigo-600 border-indigo-500 text-white shadow-sm'
+                            : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        {fmt === 'rag_json' ? 'RAG JSON' : fmt}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center gap-3 w-full sm:w-auto">
+                    <button
+                      onClick={handleGenerateExportArtifact}
+                      disabled={exportGenerating}
+                      className="flex-1 sm:flex-none bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 rounded-lg shadow-lg shadow-indigo-600/30 transition flex items-center justify-center gap-1.5"
+                    >
+                      <span>💾</span>
+                      <span>{exportGenerating ? 'Generating Artifact...' : 'Save to Object Storage'}</span>
+                    </button>
+                    <button
+                      onClick={() => handleExport(exportFormat)}
+                      className="flex-1 sm:flex-none bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium px-4 py-2 rounded-lg border border-slate-700 transition flex items-center justify-center gap-1.5"
+                    >
+                      <span>⚡</span>
+                      <span>Direct Stream</span>
+                    </button>
+                  </div>
+                </div>
+
+                {exportMessage && (
+                  <div className="p-3 bg-slate-950 border border-indigo-900/50 rounded-lg text-xs text-indigo-300 font-mono">
+                    {exportMessage}
+                  </div>
+                )}
+              </div>
+
+              {/* Stored Artifacts Table */}
+              <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-sm">
+                <div className="p-4 border-b border-slate-800 flex justify-between items-center">
+                  <h4 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">Stored Export Artifacts</h4>
+                  <span className="text-xs text-slate-500">{exportArtifacts.length} stored</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-950 text-slate-400 border-b border-slate-800 uppercase text-[10px] tracking-wider">
+                      <tr>
+                        <th className="px-4 py-3">Filename</th>
+                        <th className="px-4 py-3">Format</th>
+                        <th className="px-4 py-3">Size</th>
+                        <th className="px-4 py-3">SHA-256 Checksum</th>
+                        <th className="px-4 py-3">Expires</th>
+                        <th className="px-4 py-3">Download</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800">
+                      {exportArtifacts.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
+                            No stored export artifacts yet. Click &apos;Save to Object Storage&apos; above.
+                          </td>
+                        </tr>
+                      ) : (
+                        exportArtifacts.map((a) => (
+                          <tr key={a.id} className="hover:bg-slate-800/40 transition">
+                            <td className="px-4 py-3 font-mono text-white text-[11px]">{a.filename}</td>
+                            <td className="px-4 py-3">
+                              <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-slate-950 border border-slate-800 text-indigo-400">
+                                {a.format}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-slate-400 text-[11px]">
+                              {(a.file_size / 1024).toFixed(1)} KB
+                            </td>
+                            <td className="px-4 py-3 font-mono text-slate-500 text-[10px]">
+                              {a.checksum_sha256 ? `${a.checksum_sha256.slice(0, 12)}...` : '—'}
+                            </td>
+                            <td className="px-4 py-3 text-slate-400 text-[11px]">
+                              {a.expires_at ? new Date(a.expires_at).toLocaleDateString() : '—'}
+                            </td>
+                            <td className="px-4 py-3">
+                              <a
+                                href={`${API_URL}${a.download_url}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1 text-indigo-400 hover:text-indigo-300 font-semibold text-xs"
+                              >
+                                <span>Download</span>
+                                <span>↗</span>
+                              </a>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB: WEBHOOKS VIEW */}
+          {dashboardTab === 'webhooks' && (
+            <div className="space-y-6">
+              <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl space-y-4">
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <span>🪝</span> Webhooks & Event Subscriptions
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Receive asynchronous HTTP POST payloads whenever crawl jobs finish, fail, or exports are ready. Payloads are signed with HMAC-SHA256 headers.
+                  </p>
+                </div>
+
+                <form onSubmit={handleCreateWebhook} className="space-y-3 pt-1">
+                  <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+                    <input
+                      type="url"
+                      required
+                      placeholder="https://your-domain.com/webhooks/datagit..."
+                      value={newWebhookUrl}
+                      onChange={(e) => setNewWebhookUrl(e.target.value)}
+                      className="md:col-span-8 bg-slate-950 border border-slate-800 rounded-lg px-4 py-2.5 text-white text-xs focus:outline-none focus:border-indigo-500"
+                    />
+                    <input
+                      type="text"
+                      placeholder="job.completed,job.failed,export.ready"
+                      value={newWebhookEvents}
+                      onChange={(e) => setNewWebhookEvents(e.target.value)}
+                      className="md:col-span-4 bg-slate-950 border border-slate-800 rounded-lg px-4 py-2.5 text-white text-xs focus:outline-none focus:border-indigo-500 font-mono"
+                    />
+                  </div>
+                  <div className="flex justify-end">
+                    <button
+                      type="submit"
+                      className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-5 py-2 rounded-lg shadow-lg shadow-indigo-600/30 transition"
+                    >
+                      + Register Webhook
+                    </button>
+                  </div>
+                </form>
+
+                {createdWebhookSecret && (
+                  <div className="bg-emerald-950/70 border border-emerald-700/60 p-4 rounded-xl space-y-2">
+                    <span className="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
+                      <span>🔒</span> Webhook Secret Generated (Save now for signature verification):
+                    </span>
+                    <code className="block bg-slate-950/80 p-2.5 rounded border border-emerald-800/50 text-xs font-mono text-emerald-300 select-all overflow-x-auto">
+                      {createdWebhookSecret}
+                    </code>
+                  </div>
+                )}
+
+                {webhookTestMessage && (
+                  <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs text-indigo-300 font-mono">
+                    {webhookTestMessage}
+                  </div>
+                )}
+              </div>
+
+              {/* Webhooks Table */}
+              <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-sm">
+                <div className="p-4 border-b border-slate-800 flex justify-between items-center">
+                  <h4 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">Active Webhooks</h4>
+                  <span className="text-xs text-slate-500">{webhooks.length} endpoints</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-950 text-slate-400 border-b border-slate-800 uppercase text-[10px] tracking-wider">
+                      <tr>
+                        <th className="px-4 py-3">Endpoint URL</th>
+                        <th className="px-4 py-3">Subscribed Events</th>
+                        <th className="px-4 py-3">Last Triggered</th>
+                        <th className="px-4 py-3">Failures</th>
+                        <th className="px-4 py-3">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800">
+                      {webhooks.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
+                            No webhooks registered yet. Register an endpoint above to receive crawl lifecycle updates.
+                          </td>
+                        </tr>
+                      ) : (
+                        webhooks.map((w) => (
+                          <tr key={w.id} className="hover:bg-slate-800/40 transition">
+                            <td className="px-4 py-3 font-mono text-white text-[11px]">{w.url}</td>
+                            <td className="px-4 py-3">
+                              <div className="flex flex-wrap gap-1">
+                                {w.events.map((ev) => (
+                                  <span key={ev} className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-950 border border-slate-800 text-indigo-400">
+                                    {ev}
+                                  </span>
+                                ))}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 text-slate-400 text-[11px]">
+                              {w.last_triggered_at ? new Date(w.last_triggered_at).toLocaleString() : 'Never'}
+                            </td>
+                            <td className="px-4 py-3 text-slate-400 text-[11px]">
+                              {w.failure_count > 0 ? (
+                                <span className="text-red-400 font-semibold">{w.failure_count} errors</span>
+                              ) : (
+                                <span className="text-emerald-400">0 errors</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 flex items-center gap-3">
+                              <button
+                                onClick={() => handleTestWebhook(w.id)}
+                                disabled={testingWebhookId === w.id}
+                                className="text-indigo-400 hover:text-indigo-300 font-medium text-xs disabled:opacity-50"
+                              >
+                                {testingWebhookId === w.id ? 'Testing...' : 'Test Ping'}
+                              </button>
+                              <button
+                                onClick={() => handleDeleteWebhook(w.id)}
+                                className="text-red-400 hover:text-red-300 font-medium text-xs"
+                              >
+                                Delete
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Signature Verification Guide Box */}
+              <div className="bg-slate-900 border border-slate-800 p-5 rounded-xl space-y-2">
+                <h4 className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-2">
+                  <span>🔐</span> HMAC-SHA256 Signature Verification Example
+                </h4>
+                <p className="text-xs text-slate-400">
+                  DataGit signs every webhook payload with the <code className="text-indigo-400 font-mono">X-DataGit-Signature</code> header. Verify in Python:
+                </p>
+                <pre className="bg-slate-950 p-3 rounded-lg border border-slate-800 text-[11px] font-mono text-slate-300 overflow-x-auto">
+{`import hmac, hashlib
+
+def verify_datagit_webhook(secret: str, raw_payload: bytes, header_signature: str) -> bool:
+    expected = "sha256=" + hmac.new(secret.encode(), raw_payload, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, header_signature)`}
+                </pre>
+              </div>
+            </div>
+          )}
+
+          {/* TAB: GITHUB CREDENTIALS & TOKEN POOL VIEW */}
+          {dashboardTab === 'credentials' && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-slate-900 border border-slate-800 p-5 rounded-xl">
+                  <span className="text-slate-400 text-xs">Rotating Token Pool</span>
+                  <p className="text-2xl font-bold text-white mt-1">
+                    {rateLimit?.active_tokens_count || 1} Token{(rateLimit?.active_tokens_count || 1) > 1 ? 's' : ''}
+                  </p>
+                  <span className="text-[11px] text-emerald-400 flex items-center gap-1 mt-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                    AES-256 Encrypted at Rest
+                  </span>
+                </div>
+                <div className="bg-slate-900 border border-slate-800 p-5 rounded-xl">
+                  <span className="text-slate-400 text-xs">Total Pool Rate Remaining</span>
+                  <p className="text-2xl font-bold text-indigo-400 mt-1 font-mono">
+                    {rateLimit?.total_remaining_requests.toLocaleString() || '5,000'} / {rateLimit?.total_limit.toLocaleString() || '5,000'}
+                  </p>
+                  <span className="text-[11px] text-slate-400 mt-1">GitHub API requests available</span>
+                </div>
+                <div className="bg-slate-900 border border-slate-800 p-5 rounded-xl">
+                  <span className="text-slate-400 text-xs">Rate Limit Strategy</span>
+                  <p className="text-lg font-bold text-white mt-1">Shared Multi-Worker Store</p>
+                  <span className="text-[11px] text-slate-400 mt-1">Exponential backoff on 403/429</span>
+                </div>
+              </div>
+
+              {/* Add & Validate Token Form */}
+              <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl space-y-4">
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <span>🔑</span> Connect GitHub Personal Access Token (PAT)
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Add GitHub PATs to scale beyond the default rate limits. Tokens are tested live, encrypted with Fernet AES-256, and never logged in plain text.
+                  </p>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <input
+                    type="password"
+                    placeholder="ghp_xxxxxxxxxxxxxxxxxxxx or github_pat_..."
+                    value={tokenInput}
+                    onChange={(e) => setTokenInput(e.target.value)}
+                    className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-4 py-2.5 text-white text-xs font-mono focus:outline-none focus:border-indigo-500"
+                  />
+                  <button
+                    onClick={handleValidateToken}
+                    disabled={validatingToken || !tokenInput.trim()}
+                    className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2.5 rounded-lg border border-slate-700 transition whitespace-nowrap"
+                  >
+                    {validatingToken ? 'Verifying with GitHub...' : 'Validate Token'}
+                  </button>
+                </div>
+
+                {/* Scope recommendations */}
+                <div className="text-[11px] text-slate-400 flex flex-wrap gap-2 items-center">
+                  <span className="text-slate-500">Recommended Scopes:</span>
+                  <span className="bg-slate-950 border border-slate-800 px-2 py-0.5 rounded font-mono text-slate-300">public_repo</span>
+                  <span className="bg-slate-950 border border-slate-800 px-2 py-0.5 rounded font-mono text-slate-300">read:org</span>
+                  <span className="bg-slate-950 border border-slate-800 px-2 py-0.5 rounded font-mono text-slate-300">repo (optional, for private repos)</span>
+                </div>
+
+                {/* Validation Preview Card */}
+                {tokenValidation && (
+                  <div className="bg-slate-950 border border-emerald-800/60 p-4 rounded-xl space-y-3">
+                    <div className="flex justify-between items-center">
+                      <div className="flex items-center gap-2">
+                        <span className="text-emerald-400 text-sm">✓</span>
+                        <span className="text-xs font-bold text-white">Valid Token for @{tokenValidation.username}</span>
+                      </div>
+                      <span className="text-xs font-mono text-indigo-400">
+                        {tokenValidation.rate_limit_remaining} / {tokenValidation.rate_limit} requests remaining
+                      </span>
+                    </div>
+                    <div className="text-xs text-slate-400 flex gap-2 items-center">
+                      <span>Detected scopes:</span>
+                      <span className="font-mono text-slate-300">
+                        {tokenValidation.scopes.length > 0 ? tokenValidation.scopes.join(', ') : 'None (Public read-only)'}
+                      </span>
+                    </div>
+                    <button
+                      onClick={handleAddToken}
+                      className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-4 py-2 rounded-lg shadow transition"
+                    >
+                      Save & Encrypt into Rotating Pool
+                    </button>
+                  </div>
+                )}
+
+                {tokenAddMessage && (
+                  <div className="p-3 bg-emerald-950/60 border border-emerald-700/60 rounded-lg text-xs text-emerald-300 font-mono">
+                    ✓ {tokenAddMessage}
+                  </div>
+                )}
+
+                {tokenAddError && (
+                  <div className="p-3 bg-red-950/60 border border-red-700/60 rounded-lg text-xs text-red-300 font-mono">
+                    ⚠️ {tokenAddError}
+                  </div>
+                )}
+              </div>
+
+              {/* Pool Status Table */}
+              <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-sm">
+                <div className="p-4 border-b border-slate-800 flex justify-between items-center">
+                  <h4 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">Active Token Pool Status</h4>
+                  <span className="text-xs text-slate-500">{rateLimit?.pools?.length || 0} active</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-950 text-slate-400 border-b border-slate-800 uppercase text-[10px] tracking-wider">
+                      <tr>
+                        <th className="px-4 py-3">Token Mask</th>
+                        <th className="px-4 py-3">Quota Remaining</th>
+                        <th className="px-4 py-3">Limit</th>
+                        <th className="px-4 py-3">Reset Countdown</th>
+                        <th className="px-4 py-3">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800">
+                      {(rateLimit?.pools || []).map((p, idx) => (
+                        <tr key={idx} className="hover:bg-slate-800/40 transition">
+                          <td className="px-4 py-3 font-mono text-indigo-400 text-[11px]">{p.token_masked}</td>
+                          <td className="px-4 py-3 font-mono text-white text-[11px]">{p.remaining}</td>
+                          <td className="px-4 py-3 font-mono text-slate-400 text-[11px]">{p.limit}</td>
+                          <td className="px-4 py-3 text-slate-400 text-[11px]">{Math.floor(p.seconds_until_reset / 60)}m remaining</td>
+                          <td className="px-4 py-3">
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${p.is_exhausted ? 'bg-red-500/10 text-red-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
+                              {p.is_exhausted ? 'Cooling Down' : 'Active'}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 3: API KEYS & AUTOMATION VIEW */}
+          {dashboardTab === 'api-keys' && (
+            <div className="space-y-6">
+              <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl space-y-4">
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <span>🔑</span> Programmatic API Keys
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Authenticate headless crawlers, CI/CD pipelines, and SDKs using <code className="text-indigo-400 font-mono">X-API-Key: dg_live_...</code> or <code className="text-indigo-400 font-mono">Authorization: Bearer dg_live_...</code>
+                  </p>
+                </div>
+
+                {/* Create Key Form */}
+                <form onSubmit={handleCreateApiKey} className="flex flex-col sm:flex-row gap-3 pt-2">
+                  <input
+                    type="text"
+                    required
+                    placeholder="Key description (e.g., GitHub Actions, Production Mining Agent)..."
+                    value={newKeyName}
+                    onChange={(e) => setNewKeyName(e.target.value)}
+                    className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-4 py-2.5 text-white text-xs focus:outline-none focus:border-indigo-500"
+                  />
+                  <button
+                    type="submit"
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-5 py-2.5 rounded-lg shadow-lg shadow-indigo-600/30 transition whitespace-nowrap"
+                  >
+                    + Generate Key
+                  </button>
+                </form>
+
+                {/* One-time Key Secret Banner */}
+                {createdKey && (
+                  <div className="bg-emerald-950/70 border border-emerald-700/60 p-4 rounded-xl space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
+                        <span>🔒</span> New API Key Generated (Copy now — it will not be shown again)
+                      </span>
+                      <button
+                        onClick={handleCopyKey}
+                        className="bg-emerald-700 hover:bg-emerald-600 text-white text-xs px-3 py-1 rounded font-medium transition"
+                      >
+                        {copiedKey ? '✓ Copied!' : 'Copy Key'}
+                      </button>
+                    </div>
+                    <code className="block bg-slate-950/80 p-2.5 rounded border border-emerald-800/50 text-xs font-mono text-emerald-300 select-all overflow-x-auto">
+                      {createdKey}
+                    </code>
+                  </div>
+                )}
+              </div>
+
+              {/* API Keys Table */}
+              <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-sm">
+                <div className="p-4 border-b border-slate-800 flex justify-between items-center">
+                  <h4 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">Active Keys</h4>
+                  <span className="text-xs text-slate-500">{apiKeys.filter((k) => !k.is_revoked).length} active</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-950 text-slate-400 border-b border-slate-800 uppercase text-[10px] tracking-wider">
+                      <tr>
+                        <th className="px-4 py-3">Key Name</th>
+                        <th className="px-4 py-3">Prefix</th>
+                        <th className="px-4 py-3">Created</th>
+                        <th className="px-4 py-3">Last Used</th>
+                        <th className="px-4 py-3">Status</th>
+                        <th className="px-4 py-3">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800">
+                      {apiKeys.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
+                            No API keys created yet. Generate one above to automate data crawls.
+                          </td>
+                        </tr>
+                      ) : (
+                        apiKeys.map((k) => (
+                          <tr key={k.id} className="hover:bg-slate-800/40 transition">
+                            <td className="px-4 py-3 font-medium text-white">{k.name}</td>
+                            <td className="px-4 py-3 font-mono text-indigo-400">{k.key_prefix}...</td>
+                            <td className="px-4 py-3 text-slate-400 text-[11px]">
+                              {k.created_at ? new Date(k.created_at).toLocaleDateString() : '—'}
+                            </td>
+                            <td className="px-4 py-3 text-slate-400 text-[11px]">
+                              {k.last_used_at ? new Date(k.last_used_at).toLocaleString() : 'Never'}
+                            </td>
+                            <td className="px-4 py-3">
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase ${
+                                  k.is_revoked
+                                    ? 'bg-slate-800 text-slate-500 border border-slate-700'
+                                    : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                }`}
+                              >
+                                {k.is_revoked ? 'Revoked' : 'Active'}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3">
+                              {!k.is_revoked && (
+                                <button
+                                  onClick={() => handleRevokeApiKey(k.id)}
+                                  className="text-red-400 hover:text-red-300 text-xs font-medium"
+                                >
+                                  Revoke
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Interactive Code Snippets / SDK Quickstart */}
+              <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-sm">
+                <div className="p-4 border-b border-slate-800 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                  <div>
+                    <h4 className="text-xs font-semibold text-white uppercase tracking-wider flex items-center gap-2">
+                      <span>💻</span> Developer Automation & SDK Quickstart
+                    </h4>
+                    <p className="text-[11px] text-slate-400 mt-0.5">Use your live API key to interact with DataGit programmatically.</p>
+                  </div>
+                  <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs font-medium">
+                    <button
+                      onClick={() => setSdkLang('python')}
+                      className={`px-3 py-1 rounded transition ${sdkLang === 'python' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                    >
+                      Python SDK
+                    </button>
+                    <button
+                      onClick={() => setSdkLang('curl')}
+                      className={`px-3 py-1 rounded transition ${sdkLang === 'curl' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                    >
+                      cURL / REST
+                    </button>
+                    <button
+                      onClick={() => setSdkLang('cli')}
+                      className={`px-3 py-1 rounded transition ${sdkLang === 'cli' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                    >
+                      DataGit CLI
+                    </button>
+                  </div>
+                </div>
+
+                <div className="p-4 bg-slate-950">
+                  {sdkLang === 'python' && (
+                    <pre className="text-xs font-mono text-slate-300 overflow-x-auto leading-relaxed">
+{`from datagit.sdk import DataGitClient
+
+# Initialize DataGit Client
+client = DataGitClient(api_key="${apiKeys.find(k => !k.is_revoked)?.key_prefix ? `${apiKeys.find(k => !k.is_revoked)?.key_prefix}...` : 'dg_live_YOUR_KEY'}", base_url="${API_URL || 'http://localhost:8000'}")
+
+# 1. Enqueue asynchronous background crawl
+job = client.jobs.create(target="facebook/react", depth="metadata", max_pages=3)
+print(f"Dispatched Job #{job['job_id']}")
+
+# 2. Search mined repository intelligence
+results = client.repositories.search(keyword="react", min_stars=5000)
+print(f"Found {results['total']} matching repositories")
+
+# 3. Generate signed object storage export
+artifact = client.exports.create_artifact(format="csv", search="react")
+print(f"Download URL (48h retention): {artifact['download_url']}")`}
+                    </pre>
+                  )}
+
+                  {sdkLang === 'curl' && (
+                    <pre className="text-xs font-mono text-slate-300 overflow-x-auto leading-relaxed">
+{`# 1. Enqueue a background crawl job
+curl -X POST "${API_URL || 'http://localhost:8000'}/api/jobs" \\
+  -H "Authorization: Bearer ${apiKeys.find(k => !k.is_revoked)?.key_prefix ? `${apiKeys.find(k => !k.is_revoked)?.key_prefix}...` : 'dg_live_YOUR_KEY'}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"target": "facebook/react", "depth": "metadata", "max_pages": 3}'
+
+# 2. Search repositories with FTS
+curl "${API_URL || 'http://localhost:8000'}/api/repos?search=react&min_stars=1000"
+
+# 3. Stream export directly
+curl -H "Authorization: Bearer ${apiKeys.find(k => !k.is_revoked)?.key_prefix ? `${apiKeys.find(k => !k.is_revoked)?.key_prefix}...` : 'dg_live_YOUR_KEY'}" \\
+  "${API_URL || 'http://localhost:8000'}/api/export?format=csv&min_stars=500" -o dataset.csv`}
+                    </pre>
+                  )}
+
+                  {sdkLang === 'cli' && (
+                    <pre className="text-xs font-mono text-slate-300 overflow-x-auto leading-relaxed">
+{`# Crawl target GitHub organization or repo
+datagit crawl facebook/react --depth metadata
+
+# Search repositories locally with filters
+datagit search --min-stars 1000 --lang TypeScript
+
+# Export dataset to CSV, JSON, or Parquet
+datagit export --format parquet --output react_ecosystem.parquet`}
+                    </pre>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 4: AUDIT TRAIL VIEW */}
+          {dashboardTab === 'audit' && (
+            <div className="space-y-6">
+              <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl">
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <span>🛡️</span> Security & Operations Audit Trail
+                </h3>
+                <p className="text-xs text-slate-400 mt-1">
+                  Immutable audit trail recording logins, crawl dispatches, credential operations, and export events.
+                </p>
+              </div>
+
+              <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-sm">
+                <div className="p-4 border-b border-slate-800 flex justify-between items-center">
+                  <h4 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">Recent Audit Events</h4>
+                  <span className="text-xs text-slate-500">{auditLogs.length} events</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-950 text-slate-400 border-b border-slate-800 uppercase text-[10px] tracking-wider">
+                      <tr>
+                        <th className="px-4 py-3">Timestamp</th>
+                        <th className="px-4 py-3">Action</th>
+                        <th className="px-4 py-3">Target</th>
+                        <th className="px-4 py-3">Details</th>
+                        <th className="px-4 py-3">Client IP</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800">
+                      {auditLogs.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
+                            No audit log events recorded yet.
+                          </td>
+                        </tr>
+                      ) : (
+                        auditLogs.map((log) => (
+                          <tr key={log.id} className="hover:bg-slate-800/40 transition">
+                            <td className="px-4 py-3 font-mono text-slate-400 text-[11px]">
+                              {log.created_at ? new Date(log.created_at).toLocaleString() : '—'}
+                            </td>
+                            <td className="px-4 py-3 font-semibold text-indigo-400">
+                              {log.action}
+                            </td>
+                            <td className="px-4 py-3 text-white font-mono text-[11px]">
+                              {log.target || '—'}
+                            </td>
+                            <td className="px-4 py-3 text-slate-300 text-[11px]">
+                              {log.details || '—'}
+                            </td>
+                            <td className="px-4 py-3 font-mono text-slate-500 text-[11px]">
+                              {log.ip_address || '—'}
                             </td>
                           </tr>
                         ))
@@ -849,6 +2266,51 @@ export default function DataGitApp() {
                 <div className="text-center py-12 text-slate-500 text-sm">Loading repository intelligence...</div>
               ) : selectedRepo ? (
                 <>
+                  {/* Repository Health Score Card */}
+                  {selectedRepo.health && (
+                    <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-semibold text-white">Repository Health</span>
+                          <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
+                            selectedRepo.health.label === 'Thriving' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30' :
+                            selectedRepo.health.label === 'Active' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/30' :
+                            selectedRepo.health.label === 'Moderate' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30' :
+                            'bg-red-500/10 text-red-400 border border-red-500/30'
+                          }`}>
+                            {selectedRepo.health.label} • {selectedRepo.health.score}/100
+                          </span>
+                        </div>
+                        <span className="text-[11px] text-slate-500 hidden sm:inline">Pushed recency, stars, issue ratio & vitality</span>
+                      </div>
+                      <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden flex">
+                        <div style={{ width: `${selectedRepo.health.score}%` }} className={`h-full ${
+                          selectedRepo.health.label === 'Thriving' ? 'bg-emerald-500' :
+                          selectedRepo.health.label === 'Active' ? 'bg-indigo-500' :
+                          selectedRepo.health.label === 'Moderate' ? 'bg-amber-500' : 'bg-red-500'
+                        }`} />
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] text-slate-400 text-center">
+                        <div className="bg-slate-900/60 p-2 rounded border border-slate-800/50">
+                          <div className="text-slate-500 text-[10px]">Recency</div>
+                          <div className="text-white font-mono font-medium mt-0.5">{selectedRepo.health.breakdown.recency}/40</div>
+                        </div>
+                        <div className="bg-slate-900/60 p-2 rounded border border-slate-800/50">
+                          <div className="text-slate-500 text-[10px]">Adoption</div>
+                          <div className="text-white font-mono font-medium mt-0.5">{selectedRepo.health.breakdown.popularity}/25</div>
+                        </div>
+                        <div className="bg-slate-900/60 p-2 rounded border border-slate-800/50">
+                          <div className="text-slate-500 text-[10px]">Hygiene</div>
+                          <div className="text-white font-mono font-medium mt-0.5">{selectedRepo.health.breakdown.issue_hygiene}/20</div>
+                        </div>
+                        <div className="bg-slate-900/60 p-2 rounded border border-slate-800/50">
+                          <div className="text-slate-500 text-[10px]">Vitality</div>
+                          <div className="text-white font-mono font-medium mt-0.5">{selectedRepo.health.breakdown.vitality}/15</div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Metadata Stats */}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                     <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
@@ -951,6 +2413,56 @@ export default function DataGitApp() {
                 Close
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* WORKSPACE CREATION MODAL */}
+      {showWorkspaceModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 max-w-md w-full rounded-2xl shadow-2xl overflow-hidden p-6 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <span>🏢</span> Create Multi-Tenant Workspace
+              </h3>
+              <button
+                onClick={() => setShowWorkspaceModal(false)}
+                className="text-slate-400 hover:text-white font-bold"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="text-xs text-slate-400">
+              Workspaces isolate crawled repositories, credentials, export artifacts, and team members.
+            </p>
+            <form onSubmit={handleCreateWorkspace} className="space-y-4 pt-1">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Workspace Name</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. AI Research Lab, Security Eng..."
+                  value={newWorkspaceName}
+                  onChange={(e) => setNewWorkspaceName(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2 text-white text-xs focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowWorkspaceModal(false)}
+                  className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-4 py-2 rounded-lg font-medium transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-2 rounded-lg shadow-lg shadow-indigo-600/30 transition"
+                >
+                  Create Workspace
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

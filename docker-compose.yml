@@ -1,0 +1,88 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: datagit-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-datagit}
+      POSTGRES_USER: ${POSTGRES_USER:-datagit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-datagit_secret}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-datagit}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: datagit-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: datagit-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATAGIT_DATABASE_URL: postgresql://${POSTGRES_USER:-datagit}:${POSTGRES_PASSWORD:-datagit_secret}@postgres:5432/${POSTGRES_DB:-datagit}
+      DATAGIT_REDIS_URL: redis://redis:6379/0
+      DATAGIT_JWT_SECRET: ${DATAGIT_JWT_SECRET:-change_this_to_a_secure_random_string_32_chars}
+      DATAGIT_DEBUG: "false"
+      DATAGIT_ALLOWED_ORIGINS: '["http://localhost:3000","https://app.datagit.dev"]'
+      DATAGIT_STORAGE_BACKEND: local
+      DATAGIT_STORAGE_LOCAL_DIR: /app/exports
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    volumes:
+      - export_data:/app/exports
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head && uvicorn datagit.api.app:app --host 0.0.0.0 --port 8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: datagit-worker
+    restart: unless-stopped
+    environment:
+      DATAGIT_DATABASE_URL: postgresql://${POSTGRES_USER:-datagit}:${POSTGRES_PASSWORD:-datagit_secret}@postgres:5432/${POSTGRES_DB:-datagit}
+      DATAGIT_REDIS_URL: redis://redis:6379/0
+      DATAGIT_JWT_SECRET: ${DATAGIT_JWT_SECRET:-change_this_to_a_secure_random_string_32_chars}
+      DATAGIT_STORAGE_BACKEND: local
+      DATAGIT_STORAGE_LOCAL_DIR: /app/exports
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    volumes:
+      - export_data:/app/exports
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python -m datagit.crawler.worker
+
+volumes:
+  postgres_data:
+  redis_data:
+  export_data:

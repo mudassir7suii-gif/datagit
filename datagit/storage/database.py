@@ -33,6 +33,26 @@ def init_db() -> None:
         Base.metadata.create_all(bind=engine)
         if is_sqlite:
             with engine.begin() as conn:
+                try:
+                    cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()]
+                    if cols and "failed_login_attempts" not in cols:
+                        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER DEFAULT 0")
+                    if cols and "locked_until" not in cols:
+                        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN locked_until DATETIME")
+                    if cols and "plan" not in cols:
+                        conn.exec_driver_sql("ALTER TABLE users ADD COLUMN plan VARCHAR(50) DEFAULT 'free'")
+
+                    # Add workspace_id columns if missing
+                    for table in ("repositories", "crawl_jobs", "api_keys"):
+                        try:
+                            t_cols = [row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()]
+                            if t_cols and "workspace_id" not in t_cols:
+                                conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN workspace_id INTEGER REFERENCES workspaces(id) ON DELETE SET NULL")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
                 conn.exec_driver_sql("""
                     CREATE VIRTUAL TABLE IF NOT EXISTS repositories_fts USING fts5(
                         id UNINDEXED,

@@ -103,8 +103,13 @@ class GitHubClient:
         raise RuntimeError(f"Failed to fetch {url} after {retries} retries.")
 
     def detect_target_type(self, target: str) -> Optional[str]:
-        """Determines if target is a single Repository (owner/repo), Organization, or User."""
+        """Determines if target is a single Repository (owner/repo), Organization, User, or Global Search/Topic."""
         clean_target = target.strip().strip("/")
+        if clean_target.startswith("topic:"):
+            return "Topic"
+        if clean_target.startswith("search:") or clean_target.startswith("query:"):
+            return "Search"
+
         if "/" in clean_target:
             # Single repository target
             status, data, _ = self._request(f"/repos/{clean_target}")
@@ -116,26 +121,69 @@ class GitHubClient:
                 raise RuntimeError(f"GitHub API access error ({status}) checking repo '{clean_target}': {data}")
 
         status, data, _ = self._request(f"/users/{clean_target}")
-        if status == 404:
-            return None
-        if status in (401, 403):
-            raise RuntimeError(f"GitHub API authentication/access error ({status}) checking '{clean_target}': {data}")
         if status == 200 and isinstance(data, dict):
             return data.get("type", "User")
-        return "User"
+        if status in (401, 403):
+            raise RuntimeError(f"GitHub API authentication/access error ({status}) checking '{clean_target}': {data}")
+
+        # Fallback: Check if target matches global GitHub repositories (e.g. claude, chatgpt, gemini, llm)
+        status, search_data, _ = self._request("/search/repositories", params={"q": clean_target, "per_page": 1})
+        if status == 200 and isinstance(search_data, dict) and search_data.get("total_count", 0) > 0:
+            return "Search"
+
+        return None
 
     def fetch_repositories(self, target: str, max_pages: Optional[int] = 10, per_page: int = 100) -> List[Dict[str, Any]]:
-        """Crawls all repositories for a user, organization, or single repository."""
+        """Crawls all repositories for a user, organization, single repository, or global GitHub search/topic."""
         clean_target = target.strip().strip("/")
         target_type = self.detect_target_type(clean_target)
         if target_type is None:
-            raise ValueError(f"GitHub target '{clean_target}' was not found (404).")
+            raise ValueError(f"GitHub target '{clean_target}' was not found on GitHub.")
 
         if target_type == "Repository":
             status, repo_data, _ = self._request(f"/repos/{clean_target}")
             if status == 200 and isinstance(repo_data, dict):
                 return [repo_data]
             raise ValueError(f"Failed to fetch single repository '{clean_target}' (status {status}).")
+
+        if target_type in ("Search", "Topic"):
+            if clean_target.startswith("topic:"):
+                query = f"topic:{clean_target[6:].strip()}"
+            elif clean_target.startswith("search:"):
+                query = clean_target[7:].strip()
+            elif clean_target.startswith("query:"):
+                query = clean_target[6:].strip()
+            else:
+                query = clean_target
+
+            all_repos = []
+            page = 1
+            effective_max = max_pages or 10
+
+            logger.info(f"Crawling global GitHub repositories matching query '{query}' (max_pages={effective_max})...")
+
+            while page <= effective_max:
+                status, page_data, _ = self._request(
+                    "/search/repositories",
+                    params={"q": query, "sort": "stars", "order": "desc", "per_page": per_page, "page": page}
+                )
+                if status != 200 or not isinstance(page_data, dict):
+                    if page == 1 and status != 404:
+                        raise RuntimeError(f"GitHub Search API error {status} for query '{query}': {page_data}")
+                    break
+
+                items = page_data.get("items", [])
+                if not items:
+                    break
+
+                all_repos.extend(items)
+                total_count = page_data.get("total_count", 0)
+                if len(items) < per_page or len(all_repos) >= total_count:
+                    break
+                page += 1
+
+            logger.info(f"Retrieved {len(all_repos)} repositories across GitHub for query '{query}'.")
+            return all_repos
 
         endpoint = f"/orgs/{clean_target}/repos" if target_type == "Organization" else f"/users/{clean_target}/repos"
         

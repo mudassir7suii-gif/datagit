@@ -39,6 +39,13 @@ class CrawlOrchestrator:
             effective_pages = max_pages or 5
 
             try:
+                detected_type = self.client.detect_target_type(target)
+                if detected_type:
+                    job.target_type = detected_type.lower()
+            except Exception:
+                pass
+
+            try:
                 raw_repos = self.client.fetch_repositories(target, max_pages=effective_pages)
             except ValueError as fetch_err:
                 # Epic P1.1: If single repo target is not found on GitHub, mark existing record as deleted
@@ -67,7 +74,8 @@ class CrawlOrchestrator:
                     logger.info(f"Crawl job #{job_id} was cancelled by user.")
                     break
 
-                full_name = r.get("full_name") or f"{target}/{r.get('name')}"
+                owner_login = (r.get("owner") or {}).get("login") or target
+                full_name = r.get("full_name") or f"{owner_login}/{r.get('name', '')}"
                 gh_id = r.get("id")
                 
                 # Check by github_id first to prevent duplicate key crashes when repos are renamed
@@ -101,7 +109,7 @@ class CrawlOrchestrator:
 
                 repo.full_name = full_name
                 repo.github_id = gh_id
-                repo.owner = (r.get("owner") or {}).get("login", target)
+                repo.owner = owner_login
                 repo.name = r.get("name", "")
                 repo.description = r.get("description")
                 repo.url = r.get("html_url", "")

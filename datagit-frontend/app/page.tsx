@@ -897,7 +897,7 @@ export default function DataGitApp() {
   };
 
   // Export with all active filters forwarded per Constitution
-  const handleExport = (format: 'csv' | 'json' | 'parquet') => {
+  const handleExport = (format: 'csv' | 'json' | 'parquet' | 'rag_json') => {
     const params = new URLSearchParams({ format });
     if (searchTerm.trim()) params.append('search', searchTerm.trim());
     if (selectedLanguage) params.append('language', selectedLanguage);

@@ -21,10 +21,10 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
+          --health-cmd "pg_isready -U datagit -d datagit_test"
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
 
       redis:
         image: redis:7-alpine
@@ -50,17 +50,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Wait for PostgreSQL
+        run: |
+          for i in $(seq 1 30); do
+            nc -z 127.0.0.1 5432 && echo "PostgreSQL port 5432 is open!" && break
+            echo "Waiting for PostgreSQL..."
+            sleep 1
+          done
+
       - name: Run Alembic migrations
         run: |
           alembic upgrade head
         env:
-          DATABASE_URL: postgresql://datagit:datagit_dev_password@localhost:5432/datagit_test
+          DATABASE_URL: postgresql://datagit:datagit_dev_password@127.0.0.1:5432/datagit_test
           DATAGIT_JWT_SECRET: ci_jwt_secret_test_key_32_bytes_minimum_length_required
 
       - name: Run Python unit & integration tests
         run: |
           python -m unittest discover -s tests
         env:
+          DATABASE_URL: sqlite:///datagit_ci_test.db
           DATAGIT_JWT_SECRET: ci_jwt_secret_test_key_32_bytes_minimum_length_required
           DATAGIT_ENCRYPTION_KEY: ci_encryption_test_key_32_bytes_len_!!
 

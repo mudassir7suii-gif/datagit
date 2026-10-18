@@ -33,13 +33,17 @@ import os
 from sqlalchemy import create_engine
 
 def get_database_url() -> str:
-    url = context.get_x_argument(as_dictionary=True).get("url")
+    url = os.getenv("DATABASE_URL") or os.getenv("DATAGIT_DATABASE_URL")
+    if not url:
+        x_url = context.get_x_argument(as_dictionary=True).get("url")
+        if x_url:
+            url = x_url
     if not url:
         cfg_url = config.get_main_option("sqlalchemy.url")
         if cfg_url and not cfg_url.startswith("driver://"):
             url = cfg_url
     if not url:
-        url = os.getenv("DATABASE_URL") or os.getenv("DATAGIT_DATABASE_URL") or settings.database_url
+        url = settings.database_url
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
     return url
@@ -47,12 +51,13 @@ def get_database_url() -> str:
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
     url = get_database_url()
+    is_sqlite = url.startswith("sqlite")
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        render_as_batch=True,
+        render_as_batch=is_sqlite,
     )
 
     with context.begin_transaction():
@@ -70,7 +75,7 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            render_as_batch=True,
+            render_as_batch=is_sqlite,
         )
 
         with context.begin_transaction():

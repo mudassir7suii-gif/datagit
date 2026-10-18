@@ -63,9 +63,11 @@ def downgrade() -> None:
     if 'repositories' in existing_tables:
         repo_cols = [c['name'] for c in inspector.get_columns('repositories')]
         if 'ai_summary' in repo_cols:
-            op.drop_column('repositories', 'ai_summary')
+            with op.batch_alter_table('repositories', schema=None) as batch_op:
+                batch_op.drop_column('ai_summary')
 
     if 'workspaces' in existing_tables:
         ws_cols = [c['name'] for c in inspector.get_columns('workspaces')]
         if 'github_app_installation_id' in ws_cols:
-            op.drop_column('workspaces', 'github_app_installation_id')
+            with op.batch_alter_table('workspaces', schema=None) as batch_op:
+                batch_op.drop_column('github_app_installation_id')

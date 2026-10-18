@@ -30,6 +30,7 @@ class Workspace(Base):
     name = Column(String(100), nullable=False)
     slug = Column(String(100), unique=True, index=True, nullable=False)
     owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    github_app_installation_id = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=now_utc)
 
     owner = relationship("User", foreign_keys=[owner_id], back_populates="owned_workspaces")
@@ -109,6 +110,9 @@ class Repository(Base):
     
     # Data deduplication & integrity hashing
     content_hash = Column(String(64), nullable=True)
+
+    # Optional AI-generated repository technical summary (paid tier)
+    ai_summary = Column(Text, nullable=True)
 
     # Relationships
     commits = relationship("Commit", back_populates="repository", cascade="all, delete-orphan")
@@ -226,3 +230,12 @@ class SavedSearch(Base):
 
     user = relationship("User", backref="saved_searches")
 
+
+class FeatureFlag(Base):
+    __tablename__ = "feature_flags"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), unique=True, index=True, nullable=False)
+    description = Column(Text, nullable=True)
+    is_enabled = Column(Boolean, default=False)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)

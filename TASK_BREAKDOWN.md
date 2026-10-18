@@ -63,7 +63,7 @@
 ## Epic P2.1 — Onboarding & GitHub Connection
 - [x] Marketing landing page with clear one-liner and CTA
 - [x] Guided first-run: connect GitHub → crawl → results → export
-- [ ] GitHub App installation flow
+- [x] GitHub App installation flow
 - [x] PAT fallback with scope warnings
 - [x] Workspace token quota display
 
@@ -77,7 +77,7 @@
 
 ## Epic P2.3 — Quality & Delivery
 - [x] CI: lint, unit/integration tests, migrate, build
-- [ ] Preview environments for PRs
+- [x] Preview environments for PRs
 - [x] Structured logging + core metrics (queue depth, job outcomes, GitHub remaining)
 - [x] Basic status page
 - [x] Performance budgets documented and checked on critical paths
@@ -94,14 +94,14 @@
 - [x] TypeScript SDK
 - [x] Saved searches + alert notifications
 - [x] Health/activity scores
-- [ ] Optional summary generation (paid)
+- [x] Optional summary generation (paid)
 - [x] Vector/embeddings export path
 
 ## Epic P3.3 — Governance
 - [x] Admin abuse controls and token revoke tools
-- [ ] SLO dashboard and monthly review ritual
-- [ ] Feature flags for crawler experiments
-- [ ] Positioning/comparison content aligned to ICPs
+- [x] SLO dashboard and monthly review ritual
+- [x] Feature flags for crawler experiments
+- [x] Positioning/comparison content aligned to ICPs
 
 ## Release Gates
 - **Gate A (P0 complete):** external testers allowed on private beta

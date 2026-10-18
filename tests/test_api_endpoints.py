@@ -477,5 +477,89 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(data["format"], "rag_json")
         self.assertTrue(data["filename"].endswith(".rag.json"))
 
+    def test_github_app_flow(self):
+        """Epic P2.1: Tests GitHub App installation URL and callback flow."""
+        # 1. Fetch installation URL
+        r_url = self.client.get("/api/github/app/install-url", headers=self.auth_headers)
+        self.assertEqual(r_url.status_code, 200)
+        self.assertIn("install_url", r_url.json())
+        self.assertIn("github.com/apps/", r_url.json()["install_url"])
+
+        # 2. Callback with installation ID
+        r_cb = self.client.get(
+            "/api/github/app/callback?installation_id=gh_inst_987654",
+            headers=self.auth_headers
+        )
+        self.assertEqual(r_cb.status_code, 200)
+        self.assertEqual(r_cb.json()["status"], "success")
+        self.assertEqual(r_cb.json()["installation_id"], "gh_inst_987654")
+
+    def test_repository_summary_paid_flow(self):
+        """Epic P3.2: Tests AI technical summary generation requiring paid plan."""
+        # Create a test repo
+        from datagit.storage.models import Repository
+        db = SessionLocal()
+        r_suffix = uuid.uuid4().hex[:8]
+        repo_name = f"sumtest_{r_suffix}"
+        repo_full_name = f"testorg/{repo_name}"
+        repo = Repository(
+            owner="testorg",
+            name=repo_name,
+            full_name=repo_full_name,
+            url=f"https://github.com/{repo_full_name}",
+            stars=150,
+            language="Python",
+            description="High-performance data pipeline for machine learning."
+        )
+        db.add(repo)
+        db.commit()
+        db.refresh(repo)
+        repo_id = repo.id
+        db.close()
+
+        # 1. Free user should receive 403 Forbidden
+        r_free = self.client.get(f"/api/repositories/{repo_id}/summary", headers=self.auth_headers)
+        self.assertEqual(r_free.status_code, 403)
+        self.assertIn("Pro or Enterprise", r_free.json()["detail"])
+
+        # 2. Upgrade to Pro
+        self.client.post("/api/billing/checkout", json={"plan": "pro"}, headers=self.auth_headers)
+
+        # 3. Pro user should receive 200 with generated summary
+        r_pro = self.client.get(f"/api/repositories/{repo_id}/summary", headers=self.auth_headers)
+        self.assertEqual(r_pro.status_code, 200)
+        data = r_pro.json()
+        self.assertIn("overview", data)
+        self.assertIn("tech_stack", data)
+        self.assertIn("activity_level", data)
+
+    def test_feature_flags_admin_flow(self):
+        """Epic P3.3: Tests crawler feature flags listing and toggling."""
+        # 1. List flags
+        r_list = self.client.get("/api/admin/feature-flags", headers=self.auth_headers)
+        self.assertEqual(r_list.status_code, 200)
+        flags = r_list.json()
+        self.assertTrue(len(flags) >= 1)
+
+        # 2. Toggle a flag
+        r_toggle = self.client.post(
+            "/api/admin/feature-flags",
+            json={"name": "aggressive_pacing", "is_enabled": True},
+            headers=self.auth_headers
+        )
+        self.assertEqual(r_toggle.status_code, 200)
+        self.assertTrue(r_toggle.json()["is_enabled"])
+
+    def test_slo_telemetry_flow(self):
+        """Epic P3.3: Tests real-time Service Level Objectives (SLO) telemetry endpoint."""
+        r_slo = self.client.get("/api/admin/slos", headers=self.auth_headers)
+        self.assertEqual(r_slo.status_code, 200)
+        data = r_slo.json()
+        self.assertEqual(data["status"], "healthy")
+        self.assertIn("targets", data)
+        self.assertIn("current", data)
+        self.assertIn("error_budget_remaining", data)
+        self.assertLessEqual(data["current"]["crawl_start_latency_p95_seconds"], 5.0)
+
 if __name__ == "__main__":
     unittest.main()

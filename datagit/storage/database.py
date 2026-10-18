@@ -50,6 +50,22 @@ def init_db() -> None:
                                 conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN workspace_id INTEGER REFERENCES workspaces(id) ON DELETE SET NULL")
                         except Exception:
                             pass
+
+                    # Add github_app_installation_id to workspaces if missing
+                    try:
+                        ws_cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(workspaces)").fetchall()]
+                        if ws_cols and "github_app_installation_id" not in ws_cols:
+                            conn.exec_driver_sql("ALTER TABLE workspaces ADD COLUMN github_app_installation_id VARCHAR(100)")
+                    except Exception:
+                        pass
+
+                    # Add ai_summary to repositories if missing
+                    try:
+                        repo_cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(repositories)").fetchall()]
+                        if repo_cols and "ai_summary" not in repo_cols:
+                            conn.exec_driver_sql("ALTER TABLE repositories ADD COLUMN ai_summary TEXT")
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 

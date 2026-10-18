@@ -87,8 +87,17 @@ class CrawlOrchestrator:
 
                 is_new = repo is None
                 if is_new:
-                    repo = Repository(full_name=full_name, github_id=gh_id)
+                    repo = Repository(
+                        full_name=full_name,
+                        github_id=gh_id,
+                        owner=owner_login,
+                        name=r.get("name", ""),
+                        url=r.get("html_url", ""),
+                        workspace_id=job.workspace_id
+                    )
                     db.add(repo)
+                elif not repo.workspace_id and job.workspace_id:
+                    repo.workspace_id = job.workspace_id
 
                 stars = r.get("stargazers_count", 0)
                 forks = r.get("forks_count", 0)

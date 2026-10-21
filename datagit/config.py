@@ -24,7 +24,16 @@ def _resolve_database_url() -> str:
     custom_url = os.getenv("DATAGIT_DATABASE_URL") or os.getenv("DATABASE_URL")
     if custom_url:
         if custom_url.startswith("postgres://"):
-            return custom_url.replace("postgres://", "postgresql://", 1)
+            custom_url = custom_url.replace("postgres://", "postgresql://", 1)
+        if custom_url.startswith("postgresql://"):
+            try:
+                import psycopg  # noqa: F401
+            except ImportError:
+                try:
+                    import psycopg2  # noqa: F401
+                    custom_url = custom_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+                except ImportError:
+                    pass
         return custom_url
 
     # In serverless/read-only environments like Vercel or AWS Lambda

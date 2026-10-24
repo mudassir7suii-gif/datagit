@@ -1165,7 +1165,7 @@ export default function DataGitApp() {
                 <span>AI-Ready Dataset Platform</span>
               </div>
               <h1 className="text-3xl sm:text-5xl font-black tracking-tight text-white leading-tight">
-                Turn any GitHub org or repo into <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-purple-400">clean, AI-ready datasets.</span>
+                Turn any GitHub org or repo into <span className="text-transparent bg-clip-text bg-linear-to-r from-indigo-400 to-purple-400">clean, AI-ready datasets.</span>
               </h1>
               <p className="text-slate-300 text-sm sm:text-base leading-relaxed">
                 Automated repository intelligence without writing or babysitting crawlers. Paced GitHub API ingestion with shared rate budgets, full-text search, and multi-format streaming exports.
@@ -1523,7 +1523,7 @@ export default function DataGitApp() {
                           <h3 className="font-semibold text-sm text-indigo-400 group-hover:text-indigo-300 truncate">
                             {repo.full_name}
                           </h3>
-                          <div className="flex items-center gap-1.5 flex-shrink-0">
+                          <div className="flex items-center gap-1.5 shrink-0">
                             {repo.health && (
                               <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-medium ${
                                 repo.health.label === 'Thriving' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30' :
@@ -2027,7 +2027,7 @@ def verify_datagit_webhook(secret: str, raw_payload: bytes, header_signature: st
               </div>
 
               {/* GitHub App Connection Banner (Epic P2.1) */}
-              <div className="bg-gradient-to-r from-indigo-950/70 to-purple-950/70 border border-indigo-700/60 p-5 rounded-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+              <div className="bg-linear-to-r from-indigo-950/70 to-purple-950/70 border border-indigo-700/60 p-5 rounded-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                 <div className="space-y-1">
                   <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
                     ⭐ Recommended for Organizations

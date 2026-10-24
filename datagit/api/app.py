@@ -158,7 +158,8 @@ def sign_up(req: UserAuthRequest, request: Request, response: Response, db: Sess
         # Epic P1.1: Auto-create initial personal workspace for multi-tenancy
         user_prefix = email.split("@")[0].lower()
         slug_base = re.sub(r"[^\w\-]", "", user_prefix) or "workspace"
-        ws = Workspace(name=f"{user_prefix}'s Workspace", slug=f"{slug_base}-{user.id}", owner_id=user.id)
+        slug = f"{slug_base}-{user.id}-{int(time.time())}"
+        ws = Workspace(name=f"{user_prefix}'s Workspace", slug=slug, owner_id=user.id)
         db.add(ws)
         db.flush()
         db.add(WorkspaceMember(workspace_id=ws.id, user_id=user.id, role="owner"))
@@ -266,7 +267,7 @@ def sign_in(req: UserAuthRequest, request: Request, response: Response, db: Sess
     return {"message": "Login successful!", "email": user.email, "access_token": token, "token_type": "bearer"}
 
 @app.post("/api/auth/signout")
-def sign_out(response: Response, user: User = Depends(require_current_user)):
+def sign_out(response: Response, user: Optional[User] = Depends(get_current_user)):
     response.delete_cookie(key=COOKIE_NAME)
     return {"message": "Signed out successfully."}
 

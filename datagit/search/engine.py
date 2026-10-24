@@ -2,6 +2,7 @@ from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_, desc, asc, text
 from datagit.storage.models import Repository, Commit, Issue
+from datagit.storage.database import is_sqlite
 from datagit.analytics.scoring import calculate_repository_health
 
 class SearchEngine:
@@ -21,21 +22,23 @@ class SearchEngine:
     ) -> Dict[str, Any]:
         query = db.query(Repository).filter(Repository.is_deleted.isnot(True))
 
-        # High-performance search: Try SQLite FTS5 first, fallback to ILIKE
+        # High-performance search: Try SQLite FTS5 first (if using SQLite), fallback to ILIKE
         if keyword and keyword.strip():
             clean_kw = keyword.strip()
             fts_ids = None
-            try:
-                # FTS5 match query with prefix support
-                fts_term = f'"{clean_kw}"*'
-                fts_res = db.execute(
-                    text("SELECT id FROM repositories_fts WHERE repositories_fts MATCH :t LIMIT 500"),
-                    {"t": fts_term}
-                ).fetchall()
-                if fts_res:
-                    fts_ids = [row[0] for row in fts_res]
-            except Exception:
-                fts_ids = None
+            if is_sqlite:
+                try:
+                    # FTS5 match query with prefix support
+                    fts_term = f'"{clean_kw}"*'
+                    fts_res = db.execute(
+                        text("SELECT id FROM repositories_fts WHERE repositories_fts MATCH :t LIMIT 500"),
+                        {"t": fts_term}
+                    ).fetchall()
+                    if fts_res:
+                        fts_ids = [row[0] for row in fts_res]
+                except Exception:
+                    db.rollback()
+                    fts_ids = None
 
             if fts_ids is not None:
                 query = query.filter(Repository.id.in_(fts_ids))

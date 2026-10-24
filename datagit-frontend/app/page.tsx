@@ -484,7 +484,9 @@ export default function DataGitApp() {
         }
       })
       .catch(() => {
-        setView('dashboard');
+        localStorage.removeItem('datagit_token');
+        setToken('');
+        setView('signin');
       });
   }, [token]);
 

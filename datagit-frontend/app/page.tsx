@@ -1224,9 +1224,12 @@ export default function DataGitApp() {
 
                 <form onSubmit={view === 'signin' ? handleSignIn : handleSignUp} className="space-y-4">
                   <div>
-                    <label className="block text-xs uppercase tracking-wider text-slate-400 mb-1 font-semibold">Email Address</label>
+                    <label htmlFor="auth-email" className="block text-xs uppercase tracking-wider text-slate-400 mb-1 font-semibold">Email Address</label>
                     <input
+                      id="auth-email"
+                      name="email"
                       type="email"
+                      autoComplete="email"
                       required
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
@@ -1235,9 +1238,12 @@ export default function DataGitApp() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs uppercase tracking-wider text-slate-400 mb-1 font-semibold">Password (min 8 characters)</label>
+                    <label htmlFor="auth-password" className="block text-xs uppercase tracking-wider text-slate-400 mb-1 font-semibold">Password (min 8 characters)</label>
                     <input
+                      id="auth-password"
+                      name="password"
                       type="password"
+                      autoComplete={view === 'signin' ? 'current-password' : 'new-password'}
                       required
                       minLength={8}
                       maxLength={72}
@@ -1460,6 +1466,9 @@ export default function DataGitApp() {
               <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex flex-col md:flex-row gap-3 items-center justify-between">
                 <div className="flex-1 w-full flex flex-wrap sm:flex-nowrap gap-3">
                   <input
+                    id="repo-search"
+                    name="searchTerm"
+                    aria-label="Search repositories"
                     type="text"
                     placeholder="Search repository names, descriptions (FTS5 accelerated)..."
                     value={searchTerm}
@@ -1594,6 +1603,9 @@ export default function DataGitApp() {
                 </p>
                 <form onSubmit={handleTriggerJob} className="flex flex-col sm:flex-row gap-3">
                   <input
+                    id="target-org"
+                    name="targetOrg"
+                    aria-label="Crawl target"
                     type="text"
                     placeholder="e.g. google, openai, or facebook/react..."
                     value={targetOrg}
@@ -1866,6 +1878,9 @@ export default function DataGitApp() {
                 <form onSubmit={handleCreateWebhook} className="space-y-3 pt-1">
                   <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
                     <input
+                      id="webhook-url"
+                      name="webhookUrl"
+                      aria-label="Webhook endpoint URL"
                       type="url"
                       required
                       placeholder="https://your-domain.com/webhooks/datagit..."
@@ -1874,6 +1889,9 @@ export default function DataGitApp() {
                       className="md:col-span-8 bg-slate-950 border border-slate-800 rounded-lg px-4 py-2.5 text-white text-xs focus:outline-none focus:border-indigo-500"
                     />
                     <input
+                      id="webhook-events"
+                      name="webhookEvents"
+                      aria-label="Webhook subscribed events"
                       type="text"
                       placeholder="job.completed,job.failed,export.ready"
                       value={newWebhookEvents}
@@ -2058,6 +2076,9 @@ def verify_datagit_webhook(secret: str, raw_payload: bytes, header_signature: st
 
                 <div className="flex flex-col sm:flex-row gap-3">
                   <input
+                    id="token-input"
+                    name="tokenInput"
+                    aria-label="GitHub Personal Access Token"
                     type="password"
                     placeholder="ghp_xxxxxxxxxxxxxxxxxxxx or github_pat_..."
                     value={tokenInput}
@@ -2175,6 +2196,9 @@ def verify_datagit_webhook(secret: str, raw_payload: bytes, header_signature: st
                 {/* Create Key Form */}
                 <form onSubmit={handleCreateApiKey} className="flex flex-col sm:flex-row gap-3 pt-2">
                   <input
+                    id="api-key-name"
+                    name="apiKeyName"
+                    aria-label="API key description"
                     type="text"
                     required
                     placeholder="Key description (e.g., GitHub Actions, Production Mining Agent)..."
@@ -2822,8 +2846,10 @@ datagit export --format parquet --output react_ecosystem.parquet`}
             </p>
             <form onSubmit={handleCreateWorkspace} className="space-y-4 pt-1">
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Workspace Name</label>
+                <label htmlFor="workspace-name" className="block text-xs font-medium text-slate-300 mb-1">Workspace Name</label>
                 <input
+                  id="workspace-name"
+                  name="workspaceName"
                   type="text"
                   required
                   placeholder="e.g. AI Research Lab, Security Eng..."
